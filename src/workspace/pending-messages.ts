@@ -2,7 +2,7 @@ import { useCallback, useSyncExternalStore } from 'react';
 import type { ThreadItemSummary, TurnSummary } from '../../lib/codex-protocol.ts';
 
 export type PendingMessage = {
-  id: string; input: readonly unknown[]; turnId?: string; after?: string; startedAt: number;
+  id: string; input: readonly unknown[]; turnId?: string; after?: string; afterTurnId?: string; startedAt: number;
 };
 const empty: readonly PendingMessage[] = [];
 export const conversationScope = (threadId: string, hostId: string) => hostId === 'local' ? threadId : hostId + ':' + threadId;
@@ -58,8 +58,15 @@ export function withPendingMessages<T extends TurnSummary>(turns: readonly T[], 
       const anchor = message.after === undefined ? items.length - 1 : items.findIndex(item => item.id === message.after);
       items.splice(anchor < 0 ? items.length : anchor + 1, 0, item);
       result[index] = { ...turn, items };
-    } else result.push({ id: 'preparing:' + message.id, status: 'inProgress', itemsView: 'full',
-      items: [item], startedAt: message.startedAt });
+    } else {
+      // A turn/started notification can precede both the user item and the
+      // RPC reply. Keep the prompt at its send position, before that work.
+      const anchor = message.afterTurnId === undefined ? -1 : turns.findIndex(turn => turn.id === message.afterTurnId);
+      const next = message.turnId === undefined && (message.afterTurnId === undefined || anchor >= 0) ? turns[anchor + 1] : undefined;
+      const at = next ? result.findIndex(turn => turn.id === next.id) : result.length;
+      result.splice(at, 0, { id: 'preparing:' + message.id, status: 'inProgress', itemsView: 'full',
+        items: [item], startedAt: message.startedAt });
+    }
   }
   return result;
 }

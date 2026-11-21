@@ -1,5 +1,6 @@
 import { record, type HostMessage } from '../native/protocol.ts';
-import { readWorkspaceHistory, requestWorkspaceRpc, WorkspaceRequestError } from '../native/browser-workspace-rpc.ts';
+import { readWorkspaceHistory, requestWorkspaceRpc, requestWorkspaceFetch, WorkspaceRequestError } from '../native/browser-workspace-rpc.ts';
+import type { IabPanelRequest, IabPanelState } from '../browser-reuse/iab-protocol.ts';
 import type { SidebarProjectDetails, StartupHost, StartupSidebar } from '../native/startup-sidebar.ts';
 import type { ProjectAppearance } from '../native/project-appearance.ts';
 import type { SidebarProject } from '../native/backend-sidebar-state.ts';
@@ -47,6 +48,8 @@ export function sidebar(hostId = 'local', searchTerm?: string) {
 }
 
 export const olderSidebar = (hostId: string, cursor: string) => host.workbenchStartupSidebar.load(hostId, undefined, cursor);
+export const readSidebarThread = (threadId: string, hostId: string) =>
+  request<ThreadResponse>('thread/read', { threadId, includeTurns: false }, { hostId });
 export const remoteHosts = () => host.workbenchStartupSidebar.hosts();
 export const selectLocalProject = (projectId?: string) => host.workbenchSelectLocalProject(projectId);
 export const readSidebarProject = (hostId: string, id: string) =>
@@ -62,6 +65,7 @@ export const updateSidebarProject = (hostId: string, id: string, action: Project
   host.workbenchSidebarProject(hostId, id, action);
 export const projectSections = host.workbenchProjectSections;
 export const sendHostMessage = (message: HostMessage) => host.electronBridge.sendMessageFromView(message);
+export const requestIabBrowser = (params: IabPanelRequest) => requestWorkspaceFetch<IabPanelState>(sendHostMessage, 'iab-browser', { ...params });
 
 export type WorkspaceEntry = { name: string; path: string; type: 'directory' | 'file' };
 export const readWorkspaceDirectory = (root: string, directory: string, hostId: string) => host.workbenchReadWorkspaceDirectory(root, directory, hostId);
@@ -129,6 +133,10 @@ export async function listComposerPlugins(cwd: string | undefined, hostId: strin
 
 export function history(threadId: string, cursor: string | null = null, hostId = 'local') {
   return readWorkspaceHistory(sendHostMessage, threadId, cursor, hostId);
+}
+
+export function markThreadRead(threadId: string, expectedRevision: string, hostId: string) {
+  return request('thread/readState/update', { threadId, expectedRevision, operation: { type: 'read' } }, { hostId });
 }
 
 export function initialHistory(threadId: string, hostId: string) {
@@ -473,11 +481,11 @@ export function onThreadName(update: (threadId: string, name: string, hostId: st
   return () => window.removeEventListener('message', receive);
 }
 
-export type SidebarChange = { hostId?: string; threadId?: string; removed?: boolean; active?: boolean };
+export type SidebarChange = { hostId?: string; threadId?: string; removed?: boolean; active?: boolean; reconcile?: boolean; disconnected?: boolean };
 export function onSidebarChanged(update: (change: SidebarChange) => void) {
   const methods = new Set(['thread/started', 'thread/name/updated', 'thread/status/changed', 'thread/readState/changed',
     'thread/archived', 'thread/deleted', 'thread/unarchived', 'thread/section/changed', 'thread/project/updated',
-    'project/changed', 'turn/started', 'turn/completed']);
+    'project/changed', 'turn/started', 'turn/completed', 'serverRequest/resolved', 'thread/closed']);
   const keys = new Set(['local-projects', 'remote-projects', 'project-order', 'project-appearances',
     'sidebar-project-thread-orders', 'pinned-project-ids', 'pinned-thread-ids', 'thread-project-assignments']);
   const receive = (event: MessageEvent) => {
@@ -487,10 +495,18 @@ export function onSidebarChanged(update: (change: SidebarChange) => void) {
       const params = record(message.params);
       update({ hostId: message.hostId, threadId: typeof params.threadId === 'string' ? params.threadId : undefined,
         removed: message.method === 'thread/archived' || message.method === 'thread/deleted',
+        reconcile: ['thread/status/changed', 'thread/readState/changed', 'turn/started', 'turn/completed',
+          'serverRequest/resolved', 'thread/closed'].includes(String(message.method)),
         active: message.method === 'thread/status/changed' ? record(params.status).type === 'active'
           : message.method === 'turn/started' ? true : message.method === 'turn/completed' ? false : undefined });
-    } else if (message.type === 'codex-app-server-connection-changed' && message.state === 'connected') {
-      update({ hostId: typeof message.hostId === 'string' ? message.hostId : undefined });
+    } else if (message.type === 'mcp-request' && typeof message.hostId === 'string') {
+      const request = record(message.request), params = record(request.params);
+      if (typeof params.threadId === 'string' && typeof request.method === 'string' &&
+          /(?:requestApproval|requestUserInput|requestPermissions|elicitation\/request)$/.test(request.method)) {
+        update({ hostId: message.hostId, threadId: params.threadId, reconcile: true });
+      }
+    } else if (message.type === 'codex-app-server-connection-changed') {
+      update({ hostId: typeof message.hostId === 'string' ? message.hostId : undefined, disconnected: message.state !== 'connected' });
     } else if (message.type === 'pinned-threads-updated' || message.type === 'thread-project-memberships-updated' ||
         message.type === 'global-state-updated' && Array.isArray(message.keys) && message.keys.some(key => keys.has(String(key)))) update({});
   };

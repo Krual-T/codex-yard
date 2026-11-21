@@ -1,11 +1,46 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { HistoryStartup, initialWorkspaceRoute, usesPinnedToolRenderer } from '../src/native/history-startup.ts';
+import { HistoryStartup, initialWorkspaceRoute, isWorkspacePageRoute, parseWorkspaceThreadRoute, usesPinnedToolRenderer } from '../src/native/history-startup.ts';
 import type { HostMessage } from '../src/native/protocol.ts';
+import { readWorkspaceHistory } from '../src/native/browser-workspace-rpc.ts';
 
 const list = (cursor: string | null): HostMessage => ({ type: 'mcp-request', hostId: 'local', request: {
   id: 'pagination', method: 'thread/list', params: { cursor, limit: 50 },
 } });
+
+test('history captures its read revision before fetching content; older pages keep cursor-only reads', async context => {
+  const browser = new EventTarget(), sent: HostMessage[] = [];
+  for (const [key, value] of Object.entries({ window: browser, location: { origin: 'http://workspace.test' } })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    context.after(() => { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); });
+  }
+  const send = async (message: HostMessage) => { sent.push(message); };
+  function reply(message: HostMessage, result: unknown) {
+    const event = new MessageEvent('message', { origin: 'http://workspace.test', data: {
+      type: 'mcp-response', hostId: 'remote', message: { id: message.request!.id, result },
+    } });
+    Object.defineProperty(event, 'source', { value: browser });
+    browser.dispatchEvent(event);
+  }
+  const reading = readWorkspaceHistory(send, 'chat', null, 'remote');
+  assert.deepEqual(sent.map(message => message.request!.method), ['thread/read']);
+  const readState = { revision: 'before-content', firstUnread: { type: 'turn', turnId: 'earlier-page' } };
+  reply(sent[0]!, { thread: { id: 'chat' }, readState });
+  await Promise.resolve();
+  assert.equal(sent[1]!.request!.method, 'thread/turns/list');
+  assert.deepEqual(sent[1]!.request!.params, { threadId: 'chat', cursor: null, limit: 2, sortDirection: 'desc', itemsView: 'summary' });
+  reply(sent[1]!, { data: [{ id: 'latest' }, { id: 'previous' }], nextCursor: 'older' });
+  const page = await reading;
+  assert.equal(page.readState, readState);
+  assert.deepEqual(page.turns.map(turn => turn.id), ['previous', 'latest']);
+  const older = readWorkspaceHistory(send, 'chat', 'older', 'remote');
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2]!.request!.method, 'thread/turns/list');
+  assert.equal(sent[2]!.request!.params!.cursor, 'older');
+  reply(sent[2]!, { data: [], nextCursor: null });
+  assert.equal((await older).readState, undefined);
+});
 
 test('home page keeps its first interactive frames free before resuming older pages', async context => {
   context.mock.timers.enable({ apis: ['setTimeout'] });
@@ -51,14 +86,17 @@ test('workspace paint does not release a directly opened history conversation', 
   assert.equal(resumed, true);
 });
 
-test('only legacy tool routes load the pinned renderer in the source host', () => {
+test('settings, scheduling and plugin routes use the source workspace without becoming conversation routes', () => {
   for (const route of ['/settings', '/settings/general-settings', '/settings/appearance?tab=theme',
-    '/plugins', '/plugins/example', '/skills', '/automations', '/automations?filter=active', '/avatar-overlay?initialRoute=%2Favatar-overlay']) {
-    assert.ok(usesPinnedToolRenderer(route), route);
+    '/plugins', '/plugins/example', '/skills', '/automations', '/automations?filter=active']) {
+    assert.ok(!usesPinnedToolRenderer(route), route);
+    assert.ok(isWorkspacePageRoute(route), route);
+    assert.equal(parseWorkspaceThreadRoute(route), undefined, route);
   }
   for (const route of ['/', '/local/conversation', '/remote-ssh-fixture/plugins', '/settings-preview', '/automations-preview', '//plugins/other']) {
     assert.ok(!usesPinnedToolRenderer(route), route);
   }
+  assert.ok(usesPinnedToolRenderer('/avatar-overlay?initialRoute=%2Favatar-overlay'));
 });
 
 test('initial route honors metadata, notification query and direct paths', () => {

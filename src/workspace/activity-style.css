@@ -6,10 +6,6 @@
   height: 20px;
   margin-inline-start: auto;
 }
-.yard-source-thread-group:is(:hover, :has(:focus-visible), :has(.yard-source-thread-quick[data-menu-open])) .yard-source-pinned-spinner {
-  visibility: hidden;
-}
-
 /* Layout from the pinned ActivityHeader: 16px vector, 6px label gap,
    21px text line at the default size, 4px gap to the 14px Chevron. */
 .yard-source-activity-item .yard-source-activity-summary {

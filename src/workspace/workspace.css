@@ -108,7 +108,9 @@ input.yard-source-chat-title { border: 1px solid var(--color-ring, var(--color-b
 #app-shell-sidebar > .yard-source-action { margin-inline: 8px; width: calc(100% - 16px); }
 .yard-source-action { min-height: 30px; color: var(--yard-sidebar-label); }
 .yard-source-project-row { min-height: 30px; height: 30px; border-radius: 12.5px; font-size: var(--text-sm); line-height: calc(1em * 20 / 14); }
-.yard-source-project-row > span:last-child { font-size: var(--text-base); line-height: 20px; }
+.yard-source-project-row > .yard-source-project-label { font-size: var(--text-base); line-height: 20px; min-width: 0; }
+.yard-source-sidebar-activity { margin-inline-start: auto; min-width: 0; flex: 0 1 auto; font-size: 11px; line-height: 16px; color: var(--color-text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.yard-source-project-row > .yard-source-sidebar-activity { font-size: 11px; }
 .yard-source-project-row:focus-visible { outline: 2px solid var(--color-ring, currentColor); outline-offset: -2px; }
 .yard-source-project-group { position: relative; }
 .yard-source-project-group + .yard-source-thread-group { margin-block-start: 1px; }
@@ -294,6 +296,7 @@ input.yard-source-chat-title { border: 1px solid var(--color-ring, var(--color-b
 .yard-source-archive-dialog button { min-height: 28px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--color-border); }
 .yard-source-archive-dialog button:last-child { background: var(--color-text-primary); color: var(--color-surface); }
 :is(.yard-source-thread, .yard-source-project-row)[aria-current] { background: rgb(26 28 31 / .055); }
+.yard-source-unread { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--color-text-info, var(--color-text-primary)); }
 :root[data-theme="dark"] :is(.yard-source-thread, .yard-source-project-row)[aria-current] { background: rgb(255 255 255 / .08); }
 .yard-source-thread-menu { position: fixed; inset: auto; margin: 0; width: min(210px, calc(100vw - 16px)); padding: 4px 8px; border: 1px solid var(--color-border); border-radius: 16px; background: var(--color-surface-elevated-secondary); color: var(--color-text-primary); box-shadow: var(--shadow-dropdown-overlay); font-family: var(--font-ui-family, var(--font-sans-default)); font-size: 13px; }
 .yard-source-thread-menu button { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 30px; text-align: start; padding: 0 3px; border-radius: 6px; }
@@ -346,6 +349,8 @@ input.yard-source-chat-title { border: 1px solid var(--color-ring, var(--color-b
 :root[data-theme="dark"] .yard-source-workspace { --yard-workspace-muted: rgb(255 255 255 / .498); }
 .yard-source-frame[data-app-shell-sidebar-open="true"] .yard-source-workspace { border-inline-start: 1px solid var(--color-border); }
 .yard-source-main { flex: 1; display: flex; flex-direction: column; position: relative; min-width: 0; padding: 46px 16px 16px; }
+.yard-source-workspace[hidden] { display:none; }
+.yard-source-tool-workspace { padding-top:46px; }
 .yard-source-welcome { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; flex: 1; gap: 24px; padding-bottom: 56px; }
 .yard-source-welcome .heading-xl { font-weight: 400; }
 .yard-source-home-project { font: inherit; padding: 0; }

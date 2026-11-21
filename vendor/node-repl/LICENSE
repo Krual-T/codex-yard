@@ -1,0 +1,9 @@
+The versioned node_repl executable and @oai/sky files are unmodified upstream
+resources from OpenAI's Linux Codex App cua_node runtime archive
+0.0.30/20261014203459-0849368674e2 (linux-x64). The original manifest and Node
+distribution notices are retained beside the snapshot. A standalone Node
+interpreter is supplied by the deployment and is not included in this snapshot.
+
+These upstream files retain their existing copyrights and terms and are excluded
+from this project's MIT grant. This notice does not grant additional rights or
+relicense upstream software. Project-authored integration code remains in lib/.

@@ -26,7 +26,7 @@ fake.threads.set(threadId, thread);
 fake.handlers.set('initialize', () => ({ userAgent: 'codex-tui/0.169.1 (Linux)' }));
 fake.handlers.set('getAuthStatus', () => ({ authMethod: 'apikey', authToken: null, requiresOpenaiAuth: false }));
 fake.handlers.set('account/gatewayOAuth/read', () => ({ providerId: 'fixture', providerName: 'Fixture', required: false, status: null, error: null }));
-let authGate: Promise<void> | undefined, steerGate: Promise<void> | undefined;
+let authGate: Promise<void> | undefined, steerGate: Promise<void> | undefined, startGate: Promise<void> | undefined;
 fake.handlers.set('account/read', async params => {
   const wait = authGate; authGate = undefined;
   await wait;
@@ -34,14 +34,22 @@ fake.handlers.set('account/read', async params => {
 });
 fake.handlers.set('thread/resume', params => ({ ...fake.defaultResult('thread/resume', params),
   turnsBackwardsCursor: '0', itemsBackwardsCursor: '0' }));
-fake.handlers.set('thread/turns/list', params => ({ data: [...thread.turns].reverse().map(turn => ({ ...turn,
-  itemsView: params.itemsView ?? 'full', items: params.itemsView === 'notLoaded' ? [] : params.itemsView === 'summary'
-    ? turn.items.filter(item => item.type === 'userMessage' || item.type === 'agentMessage' && item.phase !== 'commentary') : turn.items,
-})), nextCursor: null, backwardsCursor: null }));
-fake.handlers.set('turn/start', params => {
+fake.handlers.set('thread/turns/list', async params => {
+  await startGate;
+  return { data: [...thread.turns].reverse().map(turn => ({ ...turn,
+    itemsView: params.itemsView ?? 'full', items: params.itemsView === 'notLoaded' ? [] : params.itemsView === 'summary'
+      ? turn.items.filter(item => item.type === 'userMessage' || item.type === 'agentMessage' && item.phase !== 'commentary') : turn.items,
+  })), nextCursor: null, backwardsCursor: null };
+});
+fake.handlers.set('turn/start', async params => {
   const result = fake.defaultResult('turn/start', params);
   const turn = thread.turns.at(-1)!;
   turn.startedAt = Math.floor(Date.now() / 1000) - 60;
+  if (startGate) {
+    fake.broadcast({ method: 'turn/started', params: { threadId, turn: { ...turn, items: [] } } });
+    await startGate;
+    startGate = undefined;
+  }
   return result;
 });
 let rejectReply = false;
@@ -96,6 +104,8 @@ try {
   await transcript.getByText('Saved fixture.', { exact: true }).waitFor({ timeout: 25_000 });
   const editor = page.getByRole('textbox', { name: 'Work with Codex', exact: true }).first();
   let admit!: () => void;
+  let admitStart!: () => void;
+  if (source) startGate = new Promise<void>(resolve => { admitStart = resolve; });
   if (source) authGate = new Promise<void>(resolve => { admit = resolve; });
   await editor.fill('Start the fixture.'); await editor.press('Enter');
   if (source) {
@@ -109,12 +119,25 @@ try {
   }
   await fake.waitForCall('turn/start');
   if (source) {
+    await page.waitForFunction(() => document.querySelector('.yard-source-turn:not(:has([data-preparing-message]))[data-turn-status="inProgress"]'));
+    await transcript.locator('.yard-source-thinking').waitFor();
+    await snapshot('start-before-receipt');
+    const ahead = await transcript.getByText('Start the fixture.', { exact: true }).evaluate(prompt =>
+      [...document.querySelectorAll('.yard-source-thinking')].some(thinking =>
+        !!(thinking.compareDocumentPosition(prompt) & Node.DOCUMENT_POSITION_FOLLOWING)));
+    assert.equal(ahead, false, 'Thinking must not precede the submitted prompt while the start receipt is delayed.');
+    const started = thread.turns.at(-1)!;
+    fake.broadcast({ method: 'item/completed', params: { threadId, turnId: started.id, item: started.items[0] } });
+    await transcript.locator('[data-preparing-message]').waitFor({ state: 'detached' });
+    await order([transcript.getByText('Start the fixture.', { exact: true }), transcript.locator('.yard-source-thinking')]);
+    admitStart();
     await transcript.locator('[data-preparing-message]').waitFor({ state: 'detached' });
     assert.equal(await transcript.getByText('Start the fixture.', { exact: true }).count(), 1);
     assert.equal(await editor.innerText(), 'The next draft stays intact.');
     await editor.fill('');
     checks.push('Start appears before authentication/resume, clears the editor and preserves the next draft',
-      'A canonical client ID replaces the optimistic bubble exactly once');
+      'A started turn stays below the optimistic prompt while RPC and history reads are delayed',
+      'A canonical client ID replaces the optimistic bubble exactly once, before the RPC reply');
   }
   const turn = thread.turns.at(-1)!;
   const finish = (item: ThreadItemSummary) => {

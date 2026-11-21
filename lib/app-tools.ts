@@ -1,11 +1,12 @@
 import { constants } from 'node:fs';
-import { access, chmod, lstat, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
-import { createConnection, createServer } from 'node:net';
+import { access, chmod, mkdtemp, rm, stat } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import type { Socket } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { errorMessage, isRecord } from './codex-protocol.ts';
 import type { RpcId } from './codex-protocol.ts';
 import { bundledAppToolsAdapter } from './app-resources.ts';
+import { preparePrivateSocket } from './private-socket.ts';
 
 export const defaultAppToolsAdapter = bundledAppToolsAdapter;
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
@@ -49,11 +50,6 @@ function isCall(value: unknown): value is AppToolCall {
     ['threadId', 'turnId', 'callId', 'namespace', 'tool'].every(key => typeof value[key] === 'string' && value[key].trim()) &&
     Object.hasOwn(value, 'arguments');
 }
-function missingFile(cause: unknown): null {
-  if (!isRecord(cause) || cause.code !== 'ENOENT') throw cause;
-  return null;
-}
-
 /** Hosts the native pipe consumed by the installed official Codex App Tools MCP adapter. */
 export async function createAppTools({ tools, callTool, adapterPath = process.env.AGENTS_APP_TOOLS_ADAPTER || defaultAppToolsAdapter, socketPath: requestedSocketPath }: AppToolsOptions) {
   adapterPath = resolve(adapterPath);
@@ -69,34 +65,7 @@ export async function createAppTools({ tools, callTool, adapterPath = process.en
   const directory = requestedSocketPath == null ? await mkdtemp('/tmp/aw-') : dirname(resolve(requestedSocketPath));
   const socketPath = requestedSocketPath == null ? join(directory, 'tools.sock') : resolve(requestedSocketPath);
   if (Buffer.byteLength(socketPath) > 107) throw new Error(`App Tools Unix socket 路径超过 107 字节，请缩短数据目录：${socketPath}`);
-  if (!temporary) {
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    const parent = await lstat(directory);
-    if (!parent.isDirectory() || parent.uid !== process.getuid?.() || (parent.mode & 0o077)) {
-      throw new Error(`App Tools socket 需要当前用户拥有的私有目录（0700）：${directory}`);
-    }
-    const existing = await lstat(socketPath).catch(missingFile);
-    if (existing) {
-      if (!existing.isSocket() || existing.uid !== process.getuid?.() || (existing.mode & 0o077)) {
-        throw new Error(`App Tools socket 路径已被其他内容占用：${socketPath}`);
-      }
-      const active = await new Promise<boolean>((resolve, reject) => {
-        const probe = createConnection({ path: socketPath });
-        const finish = (value: boolean) => { probe.destroy(); resolve(value); };
-        probe.setTimeout(300, () => finish(true));
-        probe.once('connect', () => finish(true));
-        probe.once('error', cause => {
-          probe.destroy();
-          if (isRecord(cause) && (cause.code === 'ECONNREFUSED' || cause.code === 'ENOENT')) resolve(false);
-          else reject(cause);
-        });
-      });
-      if (active) throw new Error(`App Tools socket 已由运行中的实例使用：${socketPath}`);
-      const current = await lstat(socketPath).catch(missingFile);
-      if (current && (current.ino !== existing.ino || current.dev !== existing.dev)) throw new Error('App Tools socket 在启动时发生变化，请重试。');
-      if (current) await rm(socketPath);
-    }
-  }
+  if (!temporary) await preparePrivateSocket(socketPath, 'App Tools');
   const clients = new Set<Socket>();
   let closing: Promise<void> | undefined;
   const server = createServer(socket => {

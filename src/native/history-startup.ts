@@ -13,10 +13,15 @@ export function workspaceThreadRoute(hostId: string, threadId: string) {
 }
 
 export function usesPinnedToolRenderer(route: string) {
-  return /^\/(?:settings|plugins|skills|automations|avatar-overlay)(?:[/?#]|$)/.test(route);
+  return /^\/avatar-overlay(?:[/?#]|$)/.test(route);
+}
+
+export function isWorkspacePageRoute(route: string) {
+  return /^\/(?:settings|plugins|skills|automations)(?:[/?#]|$)/.test(route);
 }
 
 export function parseWorkspaceThreadRoute(route: string) {
+  if (isWorkspacePageRoute(route) || usesPinnedToolRenderer(route)) return;
   const queryAt = route.indexOf('?');
   const parts = (queryAt < 0 ? route : route.slice(0, queryAt)).split('/');
   if (parts.length !== 3 || parts[0] !== '' || !parts[1] || !parts[2]) return;

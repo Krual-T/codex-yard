@@ -1,0 +1,25 @@
+---
+name: computer-use
+description: Control a Windows desktop through screenshots, keyboard, and pointer input.
+---
+
+# Windows desktop computer use
+
+Use `node_repl` with the host-enabled desktop client for all computer interaction. This API provides screenshots and input only. It does not expose accessibility trees, window enumeration, application scripting, or browser internals.
+
+Create one client and take a screenshot before acting:
+
+```js
+const { create_client } = await import("@oai/sky/client");
+const desktop = await create_client({ target: "windows", api: "desktop" });
+const [screenshot] = await desktop.get_screenshot();
+await nodeRepl.emitImage(screenshot.data_url);
+```
+
+Read `api.md` for the complete supported API. Use only that API for desktop interaction. Reuse `desktop` across calls and close it when finished.
+
+Coordinates are pixels relative to the latest screenshot, which combines the visible monitors. Take a new screenshot after the display layout changes. Input goes to the current focus. The cursor stays where you move it; use `move` for hover and `drag_handle` to hold the mouse button while inspecting a screenshot. End the drag when finished.
+
+Emit screenshots with `nodeRepl.emitImage`. Inspect the visible result before continuing if the application is still updating. Files backing screenshots are removed when the client closes.
+
+On a physical Escape stop, stop using computer tools and tell the user. If a session is closed or cleanup fails, stop and report the error; do not create another session to bypass it.

@@ -1,0 +1,76 @@
+.yard-workspace-page { width:100%; min-width:0; flex:1; overflow:auto; padding:32px clamp(20px,4vw,64px) 64px; color:var(--color-text-primary); font-size:var(--font-ui-size,14px); }
+.yard-workspace-page > header { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-bottom:28px; }
+.yard-workspace-page h1 { display:flex; align-items:center; gap:10px; font-size:24px; line-height:1.25; font-weight:600; margin:0; }
+.yard-workspace-page h2 { font-size:15px; font-weight:600; margin:0 0 16px; }
+.yard-workspace-page h3 { font-size:14px; font-weight:550; margin:0; }
+.yard-workspace-page p { margin:10px 0; line-height:1.65; }
+.yard-workspace-page > header p,.yard-page-muted,.yard-page-path { color:var(--color-text-secondary); font-size:13px; overflow-wrap:anywhere; }
+:is(.yard-workspace-page,.yard-page-dialog) :is(button,select,input,textarea) { font:inherit; }
+:is(.yard-workspace-page,.yard-page-dialog) :is(button,select,input:not([type=checkbox]),textarea) { color:inherit; border:1px solid var(--color-border-heavy); border-radius:7px; background:var(--color-surface); padding:7px 11px; min-height:34px; }
+:is(.yard-workspace-page,.yard-page-dialog) button { display:inline-flex; align-items:center; justify-content:center; gap:6px; cursor:pointer; white-space:nowrap; }
+:is(.yard-workspace-page,.yard-page-dialog) button:hover:not(:disabled) { background:#8881; }
+:is(.yard-workspace-page,.yard-page-dialog) :disabled { opacity:.5; cursor:default; }
+:is(.yard-workspace-page,.yard-page-dialog) :focus-visible { outline:2px solid var(--app-color-text-accent); outline-offset:3px; }
+:is(.yard-workspace-page,.yard-page-dialog) button.yard-page-primary { background:var(--color-text-primary); color:var(--color-surface); border-color:transparent; }
+.yard-page-section { max-width:1000px; padding:22px 0; border-top:1px solid var(--color-border-light); }
+.yard-page-section-heading { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px; }
+.yard-page-section-heading :is(h2,h3,p) { flex:1; margin:0; }
+.yard-setting-row { display:flex; justify-content:space-between; align-items:center; gap:28px; min-height:65px; padding:12px 0; }
+.yard-setting-row > :first-child { min-width:0; flex:1; }
+.yard-setting-row > :last-child { flex-shrink:0; max-width:55%; }
+.yard-setting-row p { font-size:12px; color:var(--color-text-secondary); margin:4px 0 0; overflow-wrap:anywhere; }
+.yard-setting-row select { max-width:100%; }
+.yard-setting-row input[type=number] { width:90px; }
+.yard-setting-row code { white-space:normal; overflow-wrap:anywhere; }
+.yard-page-inline { display:flex; flex-wrap:wrap; align-items:center; gap:9px; }
+:is(.yard-workspace-page,.yard-page-dialog) input[role=switch] { appearance:none; display:inline-block; position:relative; width:34px; height:20px; flex:none; padding:0; border:1px solid var(--color-border-heavy); border-radius:12px; background:#8885; cursor:pointer; vertical-align:middle; }
+:is(.yard-workspace-page,.yard-page-dialog) input[role=switch]::before { content:''; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:#fff; box-shadow:0 1px 2px #0003; }
+:is(.yard-workspace-page,.yard-page-dialog) input[role=switch]:checked { background:var(--app-color-text-accent); }
+:is(.yard-workspace-page,.yard-page-dialog) input[role=switch]:checked::before { transform:translateX(14px); }
+.yard-page-dialog input[type=checkbox]:not([role=switch]) { appearance:auto; width:15px; height:15px; }
+.yard-page-error { color:var(--color-text-danger,#c33); overflow-wrap:anywhere; }
+.yard-page-error button { margin-left:10px; }
+.yard-page-text-button { border:0!important; padding:0!important; min-height:24px!important; text-align:left; white-space:normal!important; justify-content:flex-start!important; }
+.yard-page-dialog { color:var(--color-text-primary); background:var(--color-surface); border:1px solid var(--color-border-heavy); border-radius:15px; padding:24px; width:min(600px,calc(100vw - 28px)); max-height:calc(100svh - 40px); overflow:auto; box-shadow:0 15px 65px #0003; }
+.yard-page-dialog::backdrop { background:#0005; }
+.yard-page-dialog > header { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-bottom:20px; }
+.yard-page-dialog h2 { font-size:20px; font-weight:600; margin:0; }
+.yard-page-dialog label { display:flex; flex-direction:column; gap:6px; margin:14px 0; font-size:13px; }
+.yard-page-dialog fieldset { border:0; padding:0; min-width:0; }
+.yard-page-dialog footer { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:10px; margin-top:22px; }
+.yard-page-dialog textarea { resize:vertical; width:100%; }
+.yard-page-dialog .yard-page-file { min-height:50svh; font-family:monospace; font-size:var(--yard-code-size,13px); tab-size:2; }
+.yard-schedule-fields { display:flex; flex-wrap:wrap; gap:0 18px; }
+.yard-schedule-fields legend { font-size:13px; font-weight:550; padding-top:15px; }
+.yard-schedule-fields > label { flex:1; min-width:130px; }
+.yard-schedule-fields [role=group] { display:flex; flex-basis:100%; flex-wrap:wrap; gap:12px; }
+.yard-schedule-fields [role=group] label { flex-direction:row; align-items:center; }
+.yard-scheduled-task { display:flex; align-items:center; gap:12px; padding:14px 0; }
+.yard-scheduled-name { flex:1; align-items:flex-start!important; flex-direction:column; border:0!important; text-align:left; white-space:normal!important; }
+.yard-scheduled-name small,.yard-scheduled-runs small { color:var(--color-text-secondary); font-weight:400; display:block; }
+.yard-page-actions { position:relative; }
+.yard-page-actions summary { cursor:pointer; list-style:none; padding:8px; }
+.yard-page-actions [role=menu] { position:absolute; right:0; top:100%; z-index:2; padding:5px; min-width:130px; background:var(--color-surface); border:1px solid var(--color-border-heavy); border-radius:8px; box-shadow:0 6px 20px #0002; }
+.yard-page-actions [role=menu] button { border:0; width:100%; justify-content:flex-start; }
+.yard-scheduled-runs { list-style:none; padding:0; margin:0; }
+.yard-scheduled-runs li { padding:14px 0; border-bottom:1px solid var(--color-border-light); }
+.yard-scheduled-run-heading { display:flex; align-items:center; justify-content:space-between; gap:15px; }
+.yard-scheduled-run-heading > :first-child { text-align:left; align-items:flex-start; flex-direction:column; border:0; white-space:normal; }
+.yard-settings-layout { display:flex; height:100%; min-width:0; overflow:hidden; flex:1; }
+.yard-settings-nav { flex:0 0 200px; overflow:auto; padding:30px 15px; border-right:1px solid var(--color-border-light); }
+.yard-settings-nav h1 { font-size:17px; font-weight:600; padding:0 10px 16px; }
+.yard-settings-nav h2 { font-size:11px; color:var(--color-text-secondary); margin:18px 10px 7px; }
+.yard-settings-nav a { display:block; padding:7px 10px; border-radius:6px; color:inherit; text-decoration:none; font-size:13px; }
+.yard-settings-nav a:hover,.yard-settings-nav [aria-current],.yard-page-tabs [aria-current] { background:#8882; }
+.yard-page-tabs { display:flex; gap:7px; padding-bottom:20px; }
+.yard-workspace-page > header label { display:flex; flex-direction:column; gap:4px; font-size:11px; color:var(--color-text-secondary); }
+.yard-workspace-page > header select { font-size:13px; max-width:220px; }
+.yard-plugin-market + .yard-plugin-market { border-top:1px solid var(--color-border-light); padding-top:22px; margin-top:22px; }
+.yard-source-frame :is(pre,code) { font-size:var(--yard-code-size,13px); }
+:root[data-reduced-motion=true] .yard-source-frame *, :root[data-reduced-motion=true] .yard-page-dialog * { animation:none!important; transition:none!important; }
+@media(max-width:950px) { .yard-settings-nav { flex-basis:170px; } .yard-workspace-page { padding:24px 20px 40px; } }
+@media(max-width:600px) { .yard-settings-layout { flex-direction:column; } .yard-settings-nav { flex:0 0 auto; max-height:160px; padding:12px; border-right:0; border-bottom:1px solid var(--color-border-light); }
+  .yard-settings-nav h1 { padding:0 6px; } .yard-settings-nav section { display:contents; } .yard-settings-nav h2 { display:none; } .yard-settings-nav a { display:inline-block; }
+  .yard-setting-row { gap:15px; flex-wrap:wrap; } .yard-setting-row > :last-child { max-width:100%; } .yard-workspace-page > header { align-items:flex-start; flex-wrap:wrap; }
+}
+.yard-workspace-page,.yard-page-dialog,.yard-settings-layout { --color-border-light:var(--app-color-border-light); --color-border-heavy:var(--app-color-border-heavy); }

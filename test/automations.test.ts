@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -130,6 +130,62 @@ test('missed periods coalesce, concurrent checks claim once, and editing the nam
   const saved = await h.service.fetch('automation-update', { params: { ...updated, projectId: 'project', name: 'New title' } }) as { item: Automation };
   assert.equal(saved.item.anchor, updated.anchor); assert.equal(saved.item.nextRunAt, updated.nextRunAt);
   await assert.rejects(h.service.fetch('automation-run-now', { id: task.id }), /运行中/);
+});
+
+test('native project migration repairs a saved schedule without resetting it and survives restart', async t => {
+  const h = await fixture(t);
+  const original = (await h.options.listProjects())[0];
+  h.options.listProjects = async () => [{ ...original, projectId: h.root }];
+  const task = await h.create({ projectId: h.root, status: 'PAUSED' });
+  await h.service.close();
+  h.fake.handlers.set('initialize', () => ({ userAgent: 'codex-tui/0.164.0 (Linux)' }));
+  await writeFile(join(h.dataDir, 'projects.json'), JSON.stringify([{ name: 'Fixture', path: h.root }]));
+  const app = await createNativeWorkbench({ ...await nativeFixture(h.root), port: 0,
+    dataDir: h.dataDir, workspace: h.root, socketPath: h.fake.socketPath, codexHome: join(h.root, 'codex'),
+    hostCatalog: { hosts: [], projects: [], assignments: {} } });
+  let projectId = '';
+  try {
+    const { items: [migrated] } = await app.automations.fetch('list-automations', {}) as { items: Automation[] };
+    const project = [...h.fake.projects].find(([, project]) => (project.roots as { path: string }[])[0]?.path === h.root);
+    assert.ok(project); projectId = project[0];
+    assert.deepEqual(migrated, { ...task, target: { type: 'project', projectId }, updatedAt: migrated.updatedAt });
+    assert.ok(migrated.updatedAt > task.updatedAt);
+  } finally { await app.close(); }
+  await h.restart();
+  assert.deepEqual((await h.service.fetch('list-automations', {}) as { items: Automation[] }).items[0].target, { type: 'project', projectId });
+  h.options.listProjects = async () => [{ ...original, projectId }];
+  await h.service.fetch('automation-run-now', { id: task.id }); await h.settled();
+  assert.equal(h.fake.calls('thread/start').at(-1)!.params.projectId, projectId);
+  assert.equal((await h.history())[0].status, 'running');
+});
+
+test('an unattended due task and a pause edit resolve the old project ID before a list is opened', async t => {
+  const h = await fixture(t), original = (await h.options.listProjects())[0];
+  const task = await h.create(), paused = await h.create({ name: 'Pause edit' });
+  h.options.listProjects = async () => [{ ...original, projectId: 'native-project' }];
+  Object.assign(h.options, { resolveProjectId: async (hostId: string, id: string) => {
+    assert.equal(hostId, 'local'); return id === 'project' ? 'native-project' : id;
+  } });
+  const saved = await h.service.fetch('automation-update', { params: { ...paused, status: 'PAUSED' } }) as { item: Automation };
+  assert.deepEqual(saved.item.target, { type: 'project', projectId: 'native-project' });
+  h.setTime(task.nextRunAt!);
+  await h.service.tick(); await h.settled();
+  assert.equal(h.fake.calls('thread/start').length, 1);
+  assert.equal(h.fake.calls('thread/start')[0].params.projectId, 'native-project');
+  assert.equal((await h.history())[0].automationId, task.id);
+  assert.equal((await h.history())[0].status, 'running');
+});
+
+test('offline identity lookup preserves the task list and a removed project does not attach by directory', async t => {
+  const h = await fixture(t), task = await h.create(), original = (await h.options.listProjects())[0];
+  Object.assign(h.options, { resolveProjectId: async () => { throw new Error('Backend offline'); } });
+  assert.deepEqual((await h.service.fetch('list-automations', {}) as { items: Automation[] }).items, [task]);
+  h.options.listProjects = async () => [{ ...original, projectId: 'unrelated-project' }];
+  Object.assign(h.options, { resolveProjectId: async () => undefined });
+  await h.service.fetch('automation-run-now', { id: task.id }); await h.settled();
+  assert.equal(h.fake.calls('thread/start').length, 0);
+  assert.equal((await h.history())[0].status, 'failed');
+  assert.match((await h.history())[0].error!, /项目已移除/);
 });
 
 test('pause/delete wins over an in-flight schedule calculation, and a paused manual run does not consume the schedule', async t => {

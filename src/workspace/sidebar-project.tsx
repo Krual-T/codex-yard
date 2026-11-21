@@ -12,8 +12,9 @@ const ProjectSettings = lazy(() => import('./project-settings.tsx'));
 const ProjectMenuDialog = lazy(() => import('./project-menu-dialog.tsx'));
 type ProjectDialog = 'edit' | 'remove' | 'section' | 'files' | 'archive';
 
-export function SidebarProjectRow({ project, hostId, expanded, selected, toggle, start, update, sections, setSections, onArchived }: {
+export function SidebarProjectRow({ project, hostId, expanded, selected, activity, toggle, start, update, sections, setSections, onArchived }: {
   project: StartupProject; hostId: string; expanded: boolean; selected: boolean;
+  activity?: string;
   toggle(): void; start?: () => void; update(action: ProjectAction): Promise<void>;
   sections: ProjectSection[]; setSections(next: ProjectSection[]): void;
   onArchived(ids: string[], failed: number): void;
@@ -118,12 +119,14 @@ export function SidebarProjectRow({ project, hostId, expanded, selected, toggle,
         timer.current = setTimeout(() => setCard(open => open ?? 'pointer'), 350);
       }} onPointerLeave={leave}>
       <button ref={toggleButton} type="button" className="yard-source-action yard-source-project-row sidebar-item hover:bg-primary-ghost-hover"
+        aria-label={project.label} aria-description={activity ? 'Loaded chats: ' + activity : undefined}
         aria-expanded={expanded} aria-current={selected ? 'true' : undefined}
         aria-controls={card ? detailsId : undefined} aria-keyshortcuts="ArrowRight"
         onClick={() => { dismiss(); toggle(); }} onKeyDown={event => {
           if (event.key === 'ArrowRight') { event.preventDefault(); clear(); setCard('keyboard'); }
         }}>
-        <ProjectMarker appearance={project.appearance} /><span dir="auto">{project.label}</span>
+        <ProjectMarker appearance={project.appearance} /><span dir="auto" className="yard-source-project-label">{project.label}</span>
+        {activity && <span className="yard-source-sidebar-activity" title={'Loaded chats: ' + activity} aria-hidden="true">{activity}</span>}
       </button>
       <div className="yard-source-project-quick">
         <ToolMenu align="start" className="yard-source-project-actions" label={project.label} deferContent

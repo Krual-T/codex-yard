@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useId, useRef, useSyncExternalStore } from 'react';
 import { record } from '../native/protocol.ts';
 import { browserAtoms, request } from './host.ts';
+import { usePreference } from './preferences.ts';
 import { ToolMenu, ToolSubmenu } from './new-tab-tools.tsx';
 import { WorkspaceIcon } from './workspace-icon.tsx';
 import { GoalIcon } from './conversation-goal-icons.tsx';
@@ -85,7 +86,9 @@ export function useConversationUsage(threadId?: string | null, hostId = 'local')
 export type ConversationUsageController = ReturnType<typeof useConversationUsage>;
 
 /** Original t6e hover tooltip, gated by show-context-window-usage (default off). */
-export function ContextUsageIndicator({ usage, enabled = browserAtoms()['show-context-window-usage'] === true }: { usage: ContextUsage; enabled?: boolean }) {
+export function ContextUsageIndicator({ usage, enabled: override }: { usage: ContextUsage; enabled?: boolean }) {
+  const stored = usePreference('show-context-window-usage', browserAtoms()['show-context-window-usage'] === true);
+  const enabled = override ?? stored;
   const id = useId(), trigger = useRef<HTMLSpanElement>(null), tooltip = useRef<HTMLDivElement>(null);
   const percent = usage.percent;
   function show() {

@@ -55,12 +55,12 @@ const styles = `
 :root[data-workbench-mobile-viewport] #root {
   position: fixed;
   inset: var(--workbench-viewport-top) 0 auto;
-  height: var(--workbench-viewport-height);
+  height: calc(var(--workbench-viewport-height) - env(safe-area-inset-bottom, 0px));
 }
 /* Use the viewport's pixel height: percentages already compensate for CSS
    zoom, so dividing a percentage by the app zoom would apply it twice. */
 :root[data-workbench-mobile-viewport] #root > [data-app-shell-frame] {
-  height: calc(var(--workbench-viewport-height) / var(--codex-window-zoom, 1)) !important;
+  height: calc((var(--workbench-viewport-height) - env(safe-area-inset-bottom, 0px)) / var(--codex-window-zoom, 1)) !important;
 }
 @media (pointer: coarse) {
   :root { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }

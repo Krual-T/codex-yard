@@ -3,15 +3,14 @@ import * as React from 'react';
 import { createRoot } from 'react-dom/client';
 import type { PortForwardingWindow } from '../native/port-forwarding-view.tsx';
 import { ToolMenu, ToolMenuItem } from './new-tab-tools.tsx';
-import { settingsUrl } from './sidebar-profile.tsx';
 
 declare const __yardPortForwardingUrl: string;
 type Runtime = typeof import('../native/port-forwarding-view.tsx');
 let loading: Promise<Runtime> | undefined;
 let installed = false;
-let routeAfterSettings: string | undefined;
+let openSettings: () => void;
 
-export function SidebarProduct({ returnRoute }: { returnRoute?: string }) {
+export function SidebarProduct({ navigate }: { navigate(route: string): void }) {
   const id = React.useId();
   const [error, setError] = React.useState<string>();
 
@@ -22,9 +21,9 @@ export function SidebarProduct({ returnRoute }: { returnRoute?: string }) {
       const trigger = document.getElementById(id);
       if (!trigger?.getBoundingClientRect().width) return;
       trigger.focus({ preventScroll: true });
-      routeAfterSettings = returnRoute;
+      openSettings = () => navigate('/settings/connections/ssh');
       if (!installed) {
-        installPortForwarding(React, { createRoot }, () => location.assign(settingsUrl('connections/ssh', routeAfterSettings)));
+        installPortForwarding(React, { createRoot }, () => openSettings());
         installed = true;
       }
       (window as unknown as PortForwardingWindow).workbenchOpenPortForwarding?.();

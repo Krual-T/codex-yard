@@ -1,0 +1,74 @@
+# Windows Full Desktop API
+
+## API Reference
+
+Use this API for an explicitly enabled Windows full desktop session.
+
+```ts
+import { create_client } from "@oai/sky/client";
+
+const desktop = await create_client({ target: "windows", api: "desktop" });
+
+interface Client {
+  target: "windows_desktop";
+  get_screenshot(): Promise<Array<Screenshot>>; // Capture screenshots for the full desktop target.
+  click(input: DesktopClickInput): Promise<void>; // Click at a position in the latest screenshot.
+  drag(input: DesktopDragInput): Promise<void>; // Drag with the left mouse button through screenshot-relative points.
+  drag_handle(): DragHandle; // Create a drag handle for observing screenshots before releasing the mouse button.
+  scroll(input: DesktopScrollInput): Promise<void>; // Scroll at a screenshot-relative point; 120 is one wheel notch.
+  move(input: DesktopMoveInput): Promise<void>; // Move the cursor to a screenshot-relative point for hover or dragging.
+  type_text(input: DesktopTypeTextInput): Promise<void>; // Type Unicode text into the focused control.
+  press_key(input: DesktopPressKeyInput): Promise<void>; // Press a key or plus-separated chord; `Down` and `ArrowDown` name the same arrow key.
+  paste(input: DesktopPasteInput): Promise<void>; // Paste into the focused control, replacing the Windows clipboard.
+  close(): Promise<void>; // Close the desktop session.
+}
+
+type Screenshot = {
+  bytes: Uint8Array; // Raw bytes
+  data_url: string; // Base64-encoded JPEG data URL
+  filepath: string; // Local file path
+};
+
+type DesktopClickInput = {
+  click_count?: number; // Number of clicks, from 1 to 3.
+  mouse_button?: MouseButton; // Mouse button to click; defaults to left.
+  x: number; // X coordinate relative to the latest screenshot.
+  y: number; // Y coordinate relative to the latest screenshot.
+};
+
+type DesktopDragInput = {
+  path: Array<Point>;
+};
+
+type DragHandle = {
+  end(): Promise<void>; // Release the mouse button and finish the drag.
+  move_to(point: Point): Promise<void>; // Move the pressed mouse button to another desktop coordinate.
+  start(point: Point): Promise<void>; // Press the mouse button at the starting desktop coordinate.
+};
+
+type DesktopScrollInput = {
+  delta_x?: number; // Horizontal scroll distance; positive values scroll right.
+  delta_y?: number; // Vertical scroll distance; positive values scroll down.
+  x: number; // X coordinate relative to the latest screenshot.
+  y: number; // Y coordinate relative to the latest screenshot.
+};
+
+type DesktopMoveInput = Point;
+
+type DesktopTypeTextInput = {
+  text: string;
+};
+
+type DesktopPressKeyInput = {
+  key: string;
+};
+
+type DesktopPasteInput = DesktopTypeTextInput;
+
+type MouseButton = "left" | "right" | "middle" | "l" | "r" | "m";
+
+type Point = {
+  x: number; // X coordinate on the desktop screenshot.
+  y: number; // Y coordinate on the desktop screenshot.
+};
+```

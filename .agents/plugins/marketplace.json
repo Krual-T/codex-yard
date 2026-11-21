@@ -2,19 +2,92 @@
   "name": "codex-yard",
   "plugins": [
     {
-      "name": "yard-artifacts",
-      "source": { "source": "local", "path": "./plugins/yard-artifacts" },
-      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" }
+      "name": "documents",
+      "source": {
+        "source": "local",
+        "path": "./plugins/documents"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
     },
     {
-      "name": "yard-node",
-      "source": { "source": "local", "path": "./plugins/yard-node" },
-      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" }
+      "name": "pdf",
+      "source": {
+        "source": "local",
+        "path": "./plugins/pdf"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
     },
     {
-      "name": "yard-computer",
-      "source": { "source": "local", "path": "./plugins/yard-computer" },
-      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" }
+      "name": "spreadsheets",
+      "source": {
+        "source": "local",
+        "path": "./plugins/spreadsheets"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
+    },
+    {
+      "name": "presentations",
+      "source": {
+        "source": "local",
+        "path": "./plugins/presentations"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
+    },
+    {
+      "name": "template-creator",
+      "source": {
+        "source": "local",
+        "path": "./plugins/template-creator"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
+    },
+    {
+      "name": "computer-use",
+      "source": {
+        "source": "local",
+        "path": "./plugins/computer-use"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
+    },
+    {
+      "name": "browser",
+      "source": {
+        "source": "local",
+        "path": "./plugins/browser"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
+    },
+    {
+      "name": "chrome",
+      "source": {
+        "source": "local",
+        "path": "./plugins/chrome"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
     }
   ]
 }

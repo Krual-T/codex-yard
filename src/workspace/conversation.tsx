@@ -3,7 +3,7 @@ import * as React from 'react';
 import type { ThreadItemSummary, ThreadSummary } from '../../lib/codex-protocol.ts';
 import { memo, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode, type Ref } from 'react';
 import { createTurnProgressSurface } from '../native/turn-progress.ts';
-import { history, interruptTurn, MessageEditStopped, onConversationHistoryChanged, readContinuationTurns, recoverConversation, replaceLatestMessage, resumeThread } from './host.ts';
+import { history, interruptTurn, markThreadRead, MessageEditStopped, onConversationHistoryChanged, readContinuationTurns, recoverConversation, replaceLatestMessage, resumeThread } from './host.ts';
 import type { RunMessageEdit } from './composer.tsx';
 import { AttachmentCard } from './composer-attachments.tsx';
 import { attachedPrompt, editablePrompt, promptImages, type EditablePrompt } from './composer-input.ts';
@@ -25,6 +25,8 @@ import { isInputRequest, useTurnRequest } from './turn-requests.tsx';
 import { WorkspaceIcon } from './workspace-icon.tsx';
 import { turnTimeline } from './turn-timeline.ts';
 import { conversationScope, pendingMessages, usePendingMessages, withPendingMessages } from './pending-messages.ts';
+import { useMessageNavigation } from './message-navigation.tsx';
+import { messageNavigationId } from './message-navigation-history.ts';
 
 let messageDate: Intl.DateTimeFormat | undefined;
 let messageTime: Intl.DateTimeFormat | undefined;
@@ -85,8 +87,8 @@ const AssistantMessage = memo(function AssistantMessage({ text, active, turnId, 
   </article>;
 });
 
-const PromptMessage = memo(function PromptMessage({ item, hostId, startedAt, edit, editButton }: {
-  item: ThreadItemSummary; hostId: string; startedAt?: number | null; edit?: () => void; editButton?: Ref<HTMLButtonElement>;
+const PromptMessage = memo(function PromptMessage({ item, hostId, startedAt, edit, editButton, navigationId }: {
+  item: ThreadItemSummary; hostId: string; startedAt?: number | null; edit?: () => void; editButton?: Ref<HTMLButtonElement>; navigationId?: string;
 }) {
   if (!Array.isArray(item.content)) return null;
   const sent = startedAt && startedAt > 0 ? new Date(startedAt * 1000) : undefined;
@@ -98,9 +100,9 @@ const PromptMessage = memo(function PromptMessage({ item, hostId, startedAt, edi
     return [{ text, attachments: attachments.filter(file => !imagePaths.has(file.path)) }];
   });
   const replies = questionReplies(item);
-  if (replies.length) return <AsyncQuestionReplyMessage item={item} />;
+  if (replies.length) return <div data-message-navigation-id={navigationId}><AsyncQuestionReplyMessage item={item} /></div>;
   const copyText = parts.map(part => part.text).join('\n');
-  return <div className="yard-source-user-turn" data-preparing-message={item.preparing ? String(item.clientId) : undefined}>
+  return <div className="yard-source-user-turn" data-message-navigation-id={navigationId} data-preparing-message={item.preparing ? String(item.clientId) : undefined}>
     <h4 className="sr-only">You said:</h4>
     {images.length > 0 && <ConversationImages images={images} hostId={hostId} />}
     {parts.some(part => part.text || part.attachments.length) &&
@@ -188,7 +190,7 @@ export function useConversation(view?: ConversationView, onPersisted?: (id: stri
         setSelected(current => {
           if (replaceHistory || current?.view !== view) return { view, page: latest };
           const latestIds = new Set(latest.turns.map(turn => turn.id));
-          return { view, page: { ...current.page, thread: latest.thread ?? current.page.thread,
+          return { view, page: { ...current.page, thread: latest.thread ?? current.page.thread, readState: latest.readState,
             turns: [...current.page.turns.filter(turn => !latestIds.has(turn.id)), ...latest.turns] } };
         });
         setFailure(undefined);
@@ -239,10 +241,15 @@ export function Transcript({ page, stream, more, branch, openChanges, stop, runM
   const inspectedTurnId = useSyncExternalStore(stream.subscribe, stream.readInspectedTurn);
   const pending = usePendingMessages(conversationScope(stream.threadId, stream.hostId));
   useEffect(() => { pendingMessages.confirm(conversationScope(stream.threadId, stream.hostId), page?.turns ?? []); }, [stream, page?.turns]);
-  const turns = useMemo(() => withPendingMessages(mergeLiveTurns(page?.turns, live, inspectedTurnId), pending), [page?.turns, live, inspectedTurnId, pending]);
+  const recent = useMemo(() => withPendingMessages(mergeLiveTurns(page?.turns, live, inspectedTurnId), pending), [page?.turns, live, inspectedTurnId, pending]);
+  const scroller = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const follow = useRef(true);
+  const navigation = useMessageNavigation({ threadId: stream.threadId, hostId: stream.hostId, recent, scroller, content, follow });
+  const turns = navigation.turns;
   const [openedAt] = useState(() => Date.now() / 1000);
   const [workOpen, setWorkOpen] = useState(new Map<string, boolean>());
-  const last = turns.at(-1);
+  const last = recent.at(-1);
   const latestMessages = last?.items.filter(item => item.type === 'userMessage');
   const editItem = page && !page.thread?.ephemeral && last?.status !== 'inProgress' && latestMessages?.length === 1
     ? latestMessages[0] : undefined;
@@ -288,21 +295,51 @@ export function Transcript({ page, stream, more, branch, openChanges, stop, runM
   const inlineEdit = edit ? <PromptEdit prompt={edit.prompt} text={editText} change={setEditText}
     cancel={closeEdit} send={() => void sendEdit()} pending={editStatus === 'pending'} locked={editStatus === 'locked'}
     error={editError} hostId={stream.hostId} /> : undefined;
-  const scroller = useRef<HTMLDivElement>(null);
-  const content = useRef<HTMLDivElement>(null);
-  const follow = useRef(true);
   const lastPreparation = pending.at(-1)?.id;
   useLayoutEffect(() => {
     if (lastPreparation && scroller.current) {
+      navigation.latest();
       follow.current = true;
       scroller.current.scrollTop = scroller.current.scrollHeight;
     }
   }, [lastPreparation]);
   const [canScrollToEnd, setCanScrollToEnd] = useState(false);
+  const acknowledged = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const state = page?.readState;
+    if (!state?.firstUnread || canScrollToEnd || navigation.past) return;
+    const key = stream.hostId + ':' + stream.threadId + ':' + state.revision;
+    if (acknowledged.current === key) return;
+    const acknowledge = () => {
+      const node = scroller.current;
+      if (document.hidden || !document.hasFocus() || !node?.getClientRects().length ||
+          node.scrollHeight - node.scrollTop - node.clientHeight > 12 || acknowledged.current === key) return;
+      acknowledged.current = key;
+      // Reaching the latest page also reads earlier unread turns outside it.
+      // expectedRevision preserves new activity arriving after this history read.
+      void markThreadRead(stream.threadId, state.revision, stream.hostId).catch(error => {
+        if (acknowledged.current === key) acknowledged.current = undefined;
+        console.error(error);
+      });
+    };
+    acknowledge();
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) acknowledge();
+    });
+    if (scroller.current) observer.observe(scroller.current);
+    window.addEventListener('focus', acknowledge);
+    document.addEventListener('visibilitychange', acknowledge);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('focus', acknowledge);
+      document.removeEventListener('visibilitychange', acknowledge);
+    };
+  }, [stream, page?.readState, turns, canScrollToEnd, navigation.past]);
   const earlierAnchor = useRef<{ element: HTMLElement; offset: number; cursor: string } | null>(null);
   const requestingEarlier = useRef(false);
   const [earlierLoading, setEarlierLoading] = useState(false);
   function loadEarlier(preservePosition: boolean) {
+    if (navigation.past) { void navigation.extend('before'); return; }
     if (!page?.nextCursor || requestingEarlier.current) return;
     const first = preservePosition ? content.current?.querySelector<HTMLElement>('[data-turn-status]') : null;
     earlierAnchor.current = first ? { element: first, offset: first.offsetTop, cursor: page.nextCursor } : null;
@@ -343,12 +380,13 @@ export function Transcript({ page, stream, more, branch, openChanges, stop, runM
       const node = event.currentTarget;
       const wasNearEnd = follow.current;
       const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
-      follow.current = distance <= 12;
+      follow.current = !navigation.past && distance <= 12;
       setCanScrollToEnd(!follow.current);
       if (!wasNearEnd && node.scrollTop <= 32) loadEarlier(true);
     }}>
-    <div className="yard-source-transcript-content" ref={content}>
-    {page?.nextCursor ? <button type="button" disabled={earlierLoading} className="yard-source-earlier-messages"
+    {navigation.rail}
+    <div className="yard-source-transcript-content" ref={content} data-thread-user-message-navigation-content="true">
+    {(navigation.past ? navigation.past.before : page?.nextCursor) ? <button type="button" disabled={earlierLoading || navigation.busy} className="yard-source-earlier-messages"
       onClick={() => loadEarlier(false)}>
       Load earlier messages <ChevronRight size={14} aria-hidden="true" />
     </button> : null}
@@ -369,7 +407,7 @@ export function Transcript({ page, stream, more, branch, openChanges, stop, runM
       const showTime = firstPrompt && startedAt > 0 && (previous ?
         typeof previous.completedAt === 'number' && startedAt - previous.completedAt > promptSeparatorGap :
         !page?.nextCursor && openedAt - startedAt > promptSeparatorGap);
-      return <div className="yard-source-turn" key={turn.id} data-turn-status={turn.status}
+      return <div className="yard-source-turn" key={turn.id} data-turn-status={turn.status} data-message-navigation-turn={turn.id}
         data-request-open={waiting && waiting.kind !== 'command' || undefined}
         data-source-earlier-turn={index < turns.length - 1 || undefined}>
         {showTime && <TurnTime seconds={startedAt} />}
@@ -396,9 +434,11 @@ export function Transcript({ page, stream, more, branch, openChanges, stop, runM
             completedAt={item === lastAnswer ? turn.completedAt : undefined}
             branch={turn.status === 'completed' || turn.status === 'interrupted' ? branch : undefined}
             changes={item === lastAnswer ? changes : undefined} />;
-          if (edit?.turnId === turn.id && edit.itemId === item.id) return <React.Fragment key={item.id}>{inlineEdit}</React.Fragment>;
+          const navigationId = messageNavigationId(turn.id, item === firstPrompt ? undefined : item.id);
+          if (edit?.turnId === turn.id && edit.itemId === item.id) return <div key={item.id} data-message-navigation-id={navigationId}>{inlineEdit}</div>;
           const canEdit = !edit && item === editItem && !!latestPrompt;
           return <PromptMessage key={typeof item.clientId === 'string' ? item.clientId : item.id} item={item} hostId={stream.hostId}
+            navigationId={navigationId}
             startedAt={item === firstPrompt ? turn.startedAt : undefined} editButton={canEdit ? editButton : undefined}
             edit={canEdit ? () => {
               setEdit({ turnId: turn.id, itemId: item.id, prompt: latestPrompt });
@@ -413,10 +453,14 @@ export function Transcript({ page, stream, more, branch, openChanges, stop, runM
         </div>}
       </div>;
     })}
+    {navigation.past?.after && <button type="button" className="yard-source-earlier-messages" disabled={navigation.busy}
+      onClick={() => void navigation.extend('after')}>Load later messages <ChevronRight size={14} aria-hidden="true" /></button>}
     {!editInPlace && inlineEdit}
     </div>
-    {canScrollToEnd && <div className="yard-source-scroll-end">
-      <button type="button" aria-label="Scroll to bottom" title="Scroll to bottom" onClick={() => {
+    {navigation.status}
+    {(canScrollToEnd || navigation.past) && <div className="yard-source-scroll-end">
+      <button type="button" aria-label={navigation.past ? 'Back to latest messages' : 'Scroll to bottom'} title={navigation.past ? 'Back to latest messages' : 'Scroll to bottom'} onClick={() => {
+        navigation.latest();
         const node = scroller.current;
         if (!node) return;
         follow.current = true;

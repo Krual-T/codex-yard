@@ -1,0 +1,13 @@
+{
+  "platform": "linux",
+  "arch": "x64",
+  "target": "linux-x64",
+  "node_version": "24.21.0-cua.1",
+  "node_binary_version": "24.21.0",
+  "node_archive_path": "v24.21.0-cua.1/node-v24.21.0-linux-x64.tar.gz",
+  "runtime_archive_name": "cua-node-0.0.30-20261014203459-0849368674e2-linux-x64.tar.gz",
+  "runtime_archive_version": "0.0.30/20261014203459-0849368674e2",
+  "node_path": "bin/node",
+  "node_modules": "lib/node_modules",
+  "node_repl_path": "bin/node_repl"
+}

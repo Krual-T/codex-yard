@@ -1,6 +1,7 @@
 import { ArrowUp, Check, FolderClosed, Mic, Square, X } from 'lucide-react';
 import { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type Ref } from 'react';
 import { baseKeymap, splitBlock } from 'prosemirror-commands';
+import { preference } from './preferences.ts';
 import { closeHistory, history, redo, undo } from 'prosemirror-history';
 import { keymap } from 'prosemirror-keymap';
 import { Fragment, Schema, type Node } from 'prosemirror-model';
@@ -149,17 +150,40 @@ function placeholder(label: string) {
 }
 
 export function mountPromptEditor(mount: HTMLElement, text: string, label: string, onChange: (text: string) => void,
-  attributes: NonNullable<DirectEditorProps['attributes']> = {}, historyScope?: string) {
+  attributes: NonNullable<DirectEditorProps['attributes']> = {}, historyScope?: string, onEnter?: (event: KeyboardEvent) => boolean) {
   let selection: { index: number; text: string } | undefined;
   const editor = new EditorView(mount, {
     state: EditorState.create({ doc: content(text), schema,
       plugins: [placeholder(label), history(), keymap({
         'Mod-z': undo, 'Shift-Mod-z': redo, 'Mod-y': redo, 'Shift-Enter': splitBlock,
       }), keymap(baseKeymap)] }),
-    attributes: { ...attributes, 'aria-label': label, 'aria-multiline': 'true',
+    attributes: { enterkeyhint: 'send', ...attributes, 'aria-label': label, 'aria-multiline': 'true',
       'aria-placeholder': label, role: 'textbox', tabindex: '0', dir: 'auto' },
+    handleDOMEvents: {
+      keydown(view, event) {
+        if (event.key !== 'Enter' || !(event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) ||
+            event.isComposing || event.keyCode === 229 || view.composing) return false;
+        // Android's synthesized Enter omits modifiers. Handle explicit physical
+        // keyboard shortcuts before that conversion, while leaving IME Enter to
+        // ProseMirror's composition-aware DOM processing.
+        if (!event.shiftKey && !event.altKey && onEnter?.(event)) {
+          event.preventDefault(); event.stopPropagation(); return true;
+        }
+        if (event.shiftKey || event.altKey) {
+          event.preventDefault(); return splitBlock(view.state, view.dispatch);
+        }
+        return false;
+      },
+    },
     handleKeyDown(view, event) {
       const { key } = event;
+      // ProseMirror routes Android/iOS DOM-based Enter through this handler too.
+      // React's DOM keydown listener never sees those synthesized editor events.
+      if (key === 'Enter' && !event.shiftKey && !event.altKey && !event.isComposing && event.keyCode !== 229 &&
+          !view.composing && onEnter?.(event)) {
+        event.stopPropagation();
+        return true;
+      }
       if (!historyScope || key !== 'ArrowUp' && key !== 'ArrowDown' || event.altKey || event.ctrlKey ||
           event.shiftKey || event.metaKey || event.isComposing || event.keyCode === 229 || view.composing) return false;
       const { state } = view;
@@ -412,13 +436,25 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
     },
   }), [stop, status, options.pending, options.draftPermission?.id, blocked, attachments.items, attachments.pending,
     onSend, queue.mode, activeTurn, historyTurns]);
+  const enterKey = useRef<(event: KeyboardEvent) => boolean>(() => false);
+  useLayoutEffect(() => {
+    enterKey.current = event => {
+      const mode = preference<string>('composerEnterBehavior', 'enter');
+      const commandToSend = mode === 'cmdAlways' || mode === 'cmdIfMultiline' && !!view.current?.state.doc.textBetween(0, view.current.state.doc.content.size, '\n').includes('\n');
+      if (commandToSend && !event.metaKey && !event.ctrlKey) return false;
+      const reverseFollowUp = (event.metaKey || event.ctrlKey) && !commandToSend;
+      if (reverseFollowUp && !activeTurn) return false;
+      if (!event.repeat) void submit(reverseFollowUp);
+      return true;
+    };
+  });
   useLayoutEffect(() => {
     const saved = drafts()[scope];
     recoveredFiles.current = draftFiles(scope);
     const editor = mountPromptEditor(mount.current!, typeof saved === 'string' ? saved : '', label, text => {
       setPopulated(!!text.trim());
       persistDraft(text);
-    }, { 'data-codex-composer': 'true', 'data-composer-markdown': '' }, historyScope);
+    }, { 'data-codex-composer': 'true', 'data-composer-markdown': '' }, historyScope, event => enterKey.current(event));
     view.current = editor;
     stagedImages.current.clear();
     if (recoveredFiles.current.length) attachments.restore(recoveredFiles.current);
@@ -490,7 +526,7 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
           const latest = stream && mergeLiveTurns(historyTurns, stream.read()).at(-1);
           preparing.current = { id, doc: editor.state.doc, text: '', files: [] };
           pendingMessages.add(scope, { id, input: composerInput(text, files), startedAt: Date.now() / 1000,
-            ...(activeTurn ? { turnId: activeTurn, after: latest?.items.at(-1)?.id } : {}) });
+            ...(activeTurn ? { turnId: activeTurn, after: latest?.items.at(-1)?.id } : { afterTurnId: latest?.id }) });
         }
         if (stream && activeTurn) {
           if (queued) await enqueueMessage(stream.threadId, text, files, hostId);
@@ -557,7 +593,7 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
       const latest = stream && mergeLiveTurns(historyTurns, stream.read()).at(-1);
       preparing.current = { id: clientUserMessageId, doc, text, files };
       pendingMessages.add(scope, { id: clientUserMessageId, input: composerInput(submittedText, files), startedAt: Date.now() / 1000,
-        ...(activeTurn ? { turnId: activeTurn, after: latest?.items.at(-1)?.id } : {}) });
+        ...(activeTurn ? { turnId: activeTurn, after: latest?.items.at(-1)?.id } : { afterTurnId: latest?.id }) });
       recoveredFiles.current = [...recoveredFiles.current, ...files.filter(file => !recoveredFiles.current.some(row => row.path === file.path))];
       void saveDraftFiles(scope, recoveredFiles.current).catch(console.error);
       editor.dispatch(closeHistory(editor.state.tr).delete(0, doc.content.size));
@@ -710,15 +746,7 @@ export function Composer({ ref, scope, label, projectId, projects, stream, histo
         <div className="_ComposerLayoutInput_5est5_2 flex-grow overflow-y-auto" data-composer-layout={layout} data-composer-spacing="default"
           data-composer-input-variant="default" data-composer-input="">
           <div ref={mount} className="text-size-chat leading-[var(--composer-editor-line-height,1.35)] min-h-[var(--composer-editor-min-height,2.5rem)] _RichTextInput_1ev2o_1 _composer_ilwj8_1"
-            data-rich-text-layout={layout} data-composer-input-layout={layout} onKeyDownCapture={event => {
-              if (event.key !== 'Enter' || event.shiftKey || event.altKey ||
-                  event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || view.current?.composing) return;
-              const reverseFollowUp = event.metaKey || event.ctrlKey;
-              if (reverseFollowUp && !activeTurn) return;
-              event.preventDefault();
-              event.stopPropagation();
-              if (!event.repeat) void submit(reverseFollowUp);
-            }} />
+            data-rich-text-layout={layout} data-composer-input-layout={layout} />
         </div>
         <div className="yard-source-composer-footer">
           <AttachmentPicker key={projectId ?? scope} add={attachments.add} disabled={status !== 'idle'} picker={attachmentPicker} />

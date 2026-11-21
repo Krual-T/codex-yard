@@ -50,3 +50,17 @@ The npm dependencies are declared in `package.json` and locked in `package-lock.
 The Chrome companion bundles this project's transport and declares dependencies on `chrome-devtools-mcp` and `ws`. It is generated into `.local/` during the host build. It does not contain Chrome, browser profiles, cookies, or paired-device credentials.
 
 Codex and OpenAI names identify the products with which this independent project interoperates. No affiliation or endorsement is claimed.
+
+## Original Node REPL and Sky runtime
+
+`vendor/node-repl/0.0.30-20261014203459-0849368674e2/linux-x64` retains the original Linux x64 `node_repl` executable and upstream manifest from the Codex App CUA runtime (archive version `0.0.30/20261014203459-0849368674e2`). It also contains original `@oai/sky` 0.7.8, the Linux helper, and shipped `@statsig/js-client` / `@statsig/client-core` 3.33.3. The upstream Node notice is retained as `UPSTREAM-NODE-LICENSE`; package notices remain alongside their files. That Node notice does not relicense other components. No executable is translated or patched; standalone Node launches it through Yard's project-authored configuration. `lib/sky-service.ts` adds turn-owned input cleanup around the original RPC service.
+
+`vendor/node-repl/app-26.1117.3838.0/win32-x64` contains the original Windows `node_repl.exe`, Sky **0.7.24** with its original native/Swift helpers and DLLs, Statsig dependencies and upstream manifest from App **26.1117.3838.0**. Its original `bin/node_modules` tree is stored under `lib/node_modules` to match the independent runtime layout; file contents are unchanged. Windows Node and Codex CLI remain separately installed prerequisites. The WSL input/pipe transports are project-authored TypeScript and do not modify upstream resources.
+
+## Original plugin resources and file runtime
+
+The packages `plugins/documents`, `pdf`, `spreadsheets`, `presentations` and `template-creator` originate from the locally available OpenAI primary-runtime plugin snapshot **26.909.61513**. `plugins/browser` and `chrome` retain the bundled original snapshot **26.1103.60933**, including the original browser service/client and Linux x64 extension host. The Windows x64 extension host was copied unchanged from App **26.1117.3838.0**. `plugins/computer-use` retains Sky's Linux Skill and platform references, with a Yard-authored package manifest/lifecycle hooks. Source names, versions, scripts and shipped notices are preserved. The five file Skills add a short standalone-runtime setup paragraph; `runtime.ts` is project-authored. Original Browser/Chrome Skill files remain unchanged.
+
+The copied upstream files retain their individual copyrights and terms and are excluded from this project's MIT grant. A package manifest's license label does not override a more specific retained file notice. The public Yard snapshot retains these notices and does not relicense copied resources.
+
+`artifacts:prepare` explicitly copies an already available original primary-runtime dependency tree to a private directory outside the App/cache. The validated bundle is **26.909.61513**, including `@oai/artifact-tool` **2.8.59** and its original dependency/notices tree. That runtime, user files, accounts and validation outputs are not committed. Preparation and verification scripts are project-authored. Local copying preserves the upstream declarations; any separate distribution must follow each resource's applicable terms.

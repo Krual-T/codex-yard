@@ -18,26 +18,30 @@ export function PromptEdit({ prompt, text, change, cancel, send, pending, locked
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const editor = useRef<EditorView>(null);
+  const enterKey = useRef<(event: KeyboardEvent) => boolean>(() => false);
   const [initial] = useState(text);
+  const canSend = !pending && !locked && (!!text.trim() || prompt.hasFiles);
+  const submit = () => { if (canSend && !editor.current?.composing) send(); };
+  useLayoutEffect(() => {
+    enterKey.current = event => {
+      if (event.metaKey || event.ctrlKey) return false;
+      if (!event.repeat) submit();
+      return true;
+    };
+  });
   useLayoutEffect(() => {
     if (locked) return;
-    const view = mountPromptEditor(mount.current!, initial, 'Edit message', change);
+    const view = mountPromptEditor(mount.current!, initial, 'Edit message', change, {}, undefined, event => enterKey.current(event));
     editor.current = view;
     view.focus();
     return () => { editor.current = null; view.destroy(); };
   }, [initial, change, locked]);
   useLayoutEffect(() => { editor.current?.setProps({ editable: () => !pending }); }, [pending]);
-  const canSend = !pending && !locked && (!!text.trim() || prompt.hasFiles);
-  const submit = () => { if (canSend && !editor.current?.composing) send(); };
   return <form className="yard-source-prompt-edit rounded-3xl bg-text/5 dark:bg-primary-soft"
     aria-busy={pending} onSubmit={event => { event.preventDefault(); submit(); }}
     onKeyDownCapture={event => {
       if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || editor.current?.composing) return;
       if (event.key === 'Escape' && !pending) { event.preventDefault(); cancel(); }
-      if (event.key === 'Enter' && event.target === editor.current?.dom && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
-        event.preventDefault();
-        if (!event.repeat) submit();
-      }
     }}>
     {!!prompt.attachments.length && <div className="yard-source-attachment-row">
       {prompt.attachments.map(file => <AttachmentCard key={file.path} name={file.name} file={file} hostId={hostId} preview={false} />)}

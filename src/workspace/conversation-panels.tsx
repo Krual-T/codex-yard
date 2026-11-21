@@ -23,6 +23,8 @@ import { NewTab, newTabMenu } from './new-tab-tools.tsx';
 import { TerminalPanel, type WorkspaceTerminalSession } from './terminal-panel.tsx';
 import { WorkspaceFiles } from './workspace-files.tsx';
 import { BrowserTab, BrowserTabTitle, newTabAddress, parseBrowserAddress, type WorkspaceBrowserView } from './browser-tab.tsx';
+import { IabBrowserPanel } from '../browser-reuse/iab-panel.tsx';
+import { requestIabBrowser } from './host.ts';
 import { WorkspaceSplitter } from './workspace-splitter.tsx';
 import { McpAppTabContent, type McpAppTab } from './mcp-app.tsx';
 import type { ChromeWindow } from '../browser-reuse/browser-bridge.ts';
@@ -84,7 +86,7 @@ const fallbackTitle = (index: number) => index === 1 ? 'Side chat' : 'Side chat 
 type Tool = { kind: 'new'; placeholder?: boolean; working?: boolean; error?: string } | { kind: 'chat'; view: ConversationView; error?: string } |
   { kind: 'agent'; view: ConversationView; title: string } |
   { kind: 'output'; file: OutputFile } | { kind: 'terminal'; session: WorkspaceTerminalSession; number: number } |
-  { kind: 'files'; cwd: string; query?: string } | { kind: 'browser'; view: WorkspaceBrowserView } |
+  { kind: 'files'; cwd: string; query?: string } | { kind: 'browser'; view: WorkspaceBrowserView } | { kind: 'iab' } |
   { kind: 'changes'; turnId: string; expanded: boolean } | { kind: 'sources' } | { kind: 'mcp-app'; app: McpAppTab } |
   { kind: 'goal'; threadId: string; hostId: string } | { kind: 'image-preview'; image: EditableImage; hostId: string } | ImageEditorTool;
 type ToolTab = { id: string; tool: Tool };
@@ -293,7 +295,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
   }, [supported, summaryOpen, hostId, parentId, branch.loaded, branch.loading, branch.error, branch.nextCursor]);
 
   const rows = mergeSidechats(sidechats, hostId, branch.children, [], branch.loaded, fallbackTitle);
-  const labels = { new: 'New tab', chat: 'Side chat', agent: 'Subagent', output: 'Output preview', terminal: 'Terminal', files: 'Files', browser: 'Browser',
+  const labels = { new: 'New tab', chat: 'Side chat', agent: 'Subagent', output: 'Output preview', terminal: 'Terminal', files: 'Files', browser: 'Browser', iab: 'Agent Browser',
     changes: 'Changes', sources: 'Sources', 'mcp-app': 'Tool app', goal: 'Goal', 'image-editor': 'Image editor', 'image-preview': 'Image preview' };
   const tabButton = (id: string) => tabId + '-button-' + id;
   const tabPanel = (id: string) => tabId + '-panel-' + id;
@@ -530,7 +532,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
             onAuxClick={event => { if (event.button === 1) { event.preventDefault(); closeTab(row); } }}
             onMouseDown={event => { if (event.button === 1) event.preventDefault(); }}>
             {tool.kind === 'agent' ? <Bot className="yard-source-subagent-icon" size={14} aria-hidden="true" /> :
-              tool.kind === 'terminal' ? <WorkspaceIcon name="tabTerminal" /> : tool.kind === 'browser' || tool.kind === 'new' ? <WorkspaceIcon name="tabBrowser" /> :
+              tool.kind === 'terminal' ? <WorkspaceIcon name="tabTerminal" /> : tool.kind === 'browser' || tool.kind === 'iab' || tool.kind === 'new' ? <WorkspaceIcon name="tabBrowser" /> :
               tool.kind === 'chat' ? <WorkspaceIcon name="tabChat" /> : tool.kind === 'output' ? <WorkspaceIcon name="tabFile" /> :
               tool.kind === 'files' ? <WorkspaceIcon name="tabFiles" /> :
               tool.kind === 'changes' ? <Diff size={14} aria-hidden="true" /> : tool.kind === 'sources' ? <Workflow size={13} aria-hidden="true" /> :
@@ -571,6 +573,7 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
               ...(cwd ? [{ id: 'terminal', title: 'Terminal', icon: <SquareTerminal size={16} aria-hidden="true" /> }] : []),
               ...(supported ? [{ id: 'side-chat', title: 'Side chat', icon: <MessageSquarePlus size={16} aria-hidden="true" /> }] : []),
               ...(cwd ? [{ id: 'open-file', title: 'Files', icon: <Folders size={16} aria-hidden="true" /> }] : []),
+              ...(hostId === 'local' ? [{ id: 'agent-browser', title: 'Agent Browser', icon: <WorkspaceIcon name="tabBrowser" /> }] : []),
             ]}
             yardResolveUrl={newTabAddress} yardOpenUrl={value => openBrowser(id, value, tool.kind === 'browser' ? tool.view : undefined)}
             onSearchFiles={cwd ? query => replaceTab(id, { kind: 'files', cwd, query }) : undefined}
@@ -578,13 +581,15 @@ export function ConversationPanels({ ref, parentId, hostId, workspace, createOut
               if (action.id === 'terminal' && cwd) replaceTab(id, { kind: 'terminal', number: ++terminalNumber.current, session: { sessionId: crypto.randomUUID(), hostId, cwd } });
               else if (action.id === 'side-chat') void createChild(id);
               else if (action.id === 'open-file' && cwd) replaceTab(id, { kind: 'files', cwd });
+              else if (action.id === 'agent-browser') replaceTab(id, { kind: 'iab' });
             }} onToggleBottomPanel={openBottomTerminal}>
               {tool.kind === 'new' && tool.working && <p role="status">Opening side chat…</p>}
               {tool.kind === 'new' && tool.error && <p role="alert">{tool.error}</p>}
             </NewTab>;
         return <div className="yard-source-tool-panel" key={id} role="tabpanel" id={panel.panelId} aria-labelledby={panel.labelId}
           hidden={!visible && !ownsImageComposer} data-image-composer-owner={ownsImageComposer ? '' : undefined}>
-          {tool.kind === 'mcp-app' ? <McpAppTabContent app={tool.app} /> :
+          {tool.kind === 'iab' ? visible && <IabBrowserPanel sessionId={parentId} request={requestIabBrowser} /> :
+            tool.kind === 'mcp-app' ? <McpAppTabContent app={tool.app} /> :
             tool.kind === 'output' ? <OutputPreview file={tool.file} hostId={hostId} /> : tool.kind === 'chat' ?
             <Sidechat view={tool.view} transferError={tool.error} openOutput={openOutput} openSubagent={openSubagent} openPage={openPage} openGoal={openGoal}
               openImages={openImages} tabId={id} /> :

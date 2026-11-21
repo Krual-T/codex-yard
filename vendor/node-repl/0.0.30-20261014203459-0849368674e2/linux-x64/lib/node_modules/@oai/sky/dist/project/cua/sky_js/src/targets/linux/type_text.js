@@ -1,0 +1,1 @@
+import{__awaiter as t}from"../../../../../../lib/js/oai_js/node_modules/tslib/tslib.es6.js";import{sky_linux as e}from"./sky_linux.js";function i(i){return function(o){return t(this,void 0,void 0,(function*(){yield i.action_settler.wait(),yield e("type_text",{options:i,input:i.element_ids.resolve(o)}),i.action_settler.defer()}))}}export{i as create_type_text};

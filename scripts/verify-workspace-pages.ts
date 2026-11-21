@@ -1,0 +1,188 @@
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { chromium } from 'playwright-core';
+import { createNativeWorkbench } from '../src/native/server.ts';
+import { createFakeCodex, fixtureThread, fixtureTurn, agentItem } from '../test/fake-codex.ts';
+
+const root = await mkdtemp('/tmp/yard-workspace-pages-');
+const output = resolve(process.env.AGENTS_WORKSPACE_PAGES_EVIDENCE ?? '.local/workspace-pages');
+await mkdir(output, { recursive: true });
+const dataDir = join(root, 'data'), codexHome = join(root, 'codex');
+await mkdir(dataDir); await mkdir(codexHome);
+await writeFile(join(dataDir, 'projects.json'), JSON.stringify([{ name: 'Fixture project', path: root }]));
+await writeFile(join(codexHome, 'AGENTS.md'), 'Synthetic instructions.');
+const fake = await createFakeCodex(root);
+const config: Record<string, unknown> = { approval_policy: 'never', sandbox_mode: 'workspace-write', web_search: 'cached' };
+let installed = true, enabled = true, skillEnabled = true, rejectConfig = false;
+const pluginId = 'fixture@fixture';
+const plugin = () => ({ id: pluginId, name: 'fixture', installed, enabled, interface: { displayName: 'Fixture plugin', shortDescription: 'Synthetic plugin' } });
+fake.handlers.set('getAuthStatus', () => ({ authMethod: 'apikey', authToken: null, requiresOpenaiAuth: false }));
+fake.handlers.set('account/gatewayOAuth/read', () => ({ required: false, status: null, error: null }));
+fake.handlers.set('experimentalFeature/list', () => ({ data: [], nextCursor: null }));
+fake.handlers.set('config/read', () => ({ config: { ...config }, layers: [], origins: {} }));
+fake.handlers.set('config/batchWrite', params => {
+  if (rejectConfig) throw new Error('Fixture policy rejected the change');
+  for (const edit of params.edits as { keyPath: string; value: unknown }[]) {
+    if (edit.keyPath === 'plugins."fixture@fixture".enabled') enabled = edit.value === true;
+    else config[edit.keyPath] = edit.value;
+  }
+  return { status: 'ok' };
+});
+fake.handlers.set('plugin/list', () => ({ marketplaces: [{ name: 'fixture', path: join(root, 'marketplace.json'), plugins: [plugin()] }], marketplaceLoadErrors: [] }));
+fake.handlers.set('plugin/read', () => ({ plugin: { summary: plugin(), description: 'Synthetic plugin details', mcpServers: [] } }));
+fake.handlers.set('plugin/installed', () => ({ marketplaces: [{ name: 'fixture', plugins: installed ? [plugin()] : [] }] }));
+fake.handlers.set('plugin/search', params => ({ data: params.searchTerm === 'fixture' ? [{ plugin: plugin(), marketplaceName: 'fixture', marketplacePath: join(root, 'marketplace.json') }] : [], nextCursor: null }));
+fake.handlers.set('plugin/install', () => { installed = true; enabled = true; return {}; });
+fake.handlers.set('plugin/uninstall', () => { installed = false; return {}; });
+fake.handlers.set('skills/list', () => ({ data: [{ cwd: root, skills: [{ name: 'Fixture skill', description: 'Synthetic skill', path: join(root, 'SKILL.md'), enabled: skillEnabled }], errors: [] }] }));
+fake.handlers.set('skills/config/write', params => { skillEnabled = params.enabled === true; return {}; });
+fake.handlers.set('hooks/list', () => ({ data: [{ cwd: root, hooks: [], warnings: [], errors: [] }] }));
+let shellHandle: string;
+fake.handlers.set('process/spawn', (params, { send }) => {
+  const processHandle = String(params.processHandle);
+  if (params.tty) {
+    shellHandle = processHandle;
+    send({ method: 'process/outputDelta', params: { processHandle, stream: 'stdout', deltaBase64: Buffer.from('\x1e' + processHandle + '\x1f/bin/bash\x1f1234\x1fFixture shell ready\r\n').toString('base64'), capReached: false } });
+  } else {
+    for (const handle of [shellHandle, processHandle]) send({ method: 'process/exited', params: { processHandle: handle, exitCode: 0, stdout: '', stderr: '', stdoutCapReached: false, stderrCapReached: false } });
+  }
+  return {};
+});
+fake.handlers.set('process/resizePty', () => ({}));
+fake.handlers.set('process/writeStdin', () => ({}));
+fake.handlers.set('process/kill', (params, { send }) => { send({ method: 'process/exited', params: { processHandle: params.processHandle, exitCode: 137, stdout: '', stderr: '', stdoutCapReached: false, stderrCapReached: false } }); return {}; });
+const threadId = '00000000-0000-4000-8000-000000000001';
+fake.threads.set(threadId, fixtureThread(threadId, root, { name: 'Fixture chat', turns: [fixtureTurn('before', [agentItem('answer', 'Fixture response')])] }));
+const app = await createNativeWorkbench({ port: 0, dataDir, codexHome, workspace: root, socketPath: fake.socketPath,
+  sourceWorkspace: true, hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: async () => new Response('Offline fixture', { status: 503 }) });
+const browser = await chromium.launch({ executablePath: process.env.AGENTS_TEST_CHROMIUM ?? join(homedir(), '.cache/ms-playwright/chromium-1228/chrome-linux64/chrome'),
+  headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+const checks: string[] = [], errors: string[] = [], resources: string[] = [];
+const terminalOperations: string[] = [];
+page.on('websocket', socket => socket.on('framesent', frame => {
+  const message = JSON.parse(String(frame.payload)) as { type?: string; url?: string; body?: string };
+  if (message.type === 'fetch' && message.url?.endsWith('/terminal') && message.body) terminalOperations.push(String(JSON.parse(message.body).operation));
+}));
+let documents = 0;
+page.on('pageerror', error => errors.push(error.message));
+page.on('response', response => resources.push(response.url()));
+page.on('request', request => { if (request.resourceType() === 'document' && request.frame() === page.mainFrame()) documents++; });
+const editor = page.locator('[data-codex-composer="true"][contenteditable="true"]').first();
+const settings = page.getByRole('navigation', { name: 'Settings categories' });
+const content = page.getByRole('article', { name: 'Settings', exact: true });
+const report: Record<string, unknown> = { checks, errors };
+try {
+  if (process.env.AGENTS_TEST_MASKED_APP) {
+    const { readdir } = await import('node:fs/promises');
+    assert.deepEqual(await readdir(process.env.AGENTS_TEST_MASKED_APP), []);
+    report.desktopInstallationUnavailable = true;
+  }
+  await page.goto(app.url + '/local/' + threadId, { waitUntil: 'commit' });
+  await editor.fill('A draft survives every settings page');
+  await page.getByRole('button', { name: 'Toggle terminal', exact: true }).click();
+  await page.locator('[data-codex-terminal] .xterm-screen').waitFor();
+  await page.waitForFunction(() => !document.querySelector('[data-codex-terminal] [role=alert]'));
+  const originalEditor = await editor.elementHandle();
+  await page.keyboard.press('Control+,');
+  await content.getByRole('heading', { name: 'General', exact: true }).waitFor();
+  assert.equal(documents, 1);
+  await settings.getByRole('link', { name: 'Appearance', exact: true }).click();
+  await content.getByRole('combobox', { name: 'Theme', exact: true }).selectOption('dark');
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+  await content.getByRole('spinbutton', { name: 'UI font size', exact: true }).fill('16');
+  await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--font-ui-size') === '16px');
+  await content.getByRole('combobox', { name: 'Reduce motion', exact: true }).selectOption('on');
+  await page.waitForFunction(() => document.documentElement.dataset.reducedMotion === 'true');
+  await page.screenshot({ path: join(output, 'appearance-dark.png') });
+  checks.push('Appearance changes persist through the existing host and immediately affect the source workspace');
+  await settings.getByRole('link', { name: 'Configuration', exact: true }).click();
+  await content.getByRole('combobox', { name: 'Approval policy', exact: true }).selectOption('on-request');
+  await page.waitForFunction(() => document.querySelector<HTMLSelectElement>('[aria-label="Approval policy"]')?.value === 'on-request');
+  assert.equal(config.approval_policy, 'on-request');
+  rejectConfig = true;
+  await content.getByRole('combobox', { name: 'Approval policy', exact: true }).selectOption('untrusted');
+  await content.getByRole('alert').filter({ hasText: 'Fixture policy rejected the change' }).waitFor();
+  assert.equal(await content.getByRole('combobox', { name: 'Approval policy', exact: true }).inputValue(), 'on-request');
+  rejectConfig = false;
+  checks.push('Configuration writes reach the native CLI contract; rejection preserves the confirmed value');
+  const links = await settings.getByRole('link').allTextContents();
+  for (const label of links) {
+    await settings.getByRole('link', { name: label, exact: true }).click();
+    await content.getByRole('heading', { name: label, exact: true }).first().waitFor();
+    assert.equal(documents, 1, label + ' must use application navigation');
+  }
+  checks.push('All 15 settings categories render in the same source document');
+  await settings.getByRole('link', { name: 'Connections', exact: true }).click();
+  await content.getByRole('button', { name: 'Add SSH host', exact: true }).click();
+  const ssh = page.getByRole('dialog', { name: 'SSH host', exact: true });
+  await ssh.getByLabel('Name', { exact: true }).fill('Fixture remote');
+  await ssh.getByLabel('SSH host or alias', { exact: true }).fill('fixture.invalid');
+  await ssh.getByRole('button', { name: 'Save SSH host', exact: true }).click();
+  await content.getByText('Fixture remote', { exact: true }).waitFor();
+  checks.push('SSH catalog edits save through the existing native host API without connecting to the host');
+  await page.getByRole('link', { name: 'Plugins', exact: true }).first().click();
+  const plugins = page.getByRole('article', { name: 'Plugins and skills' });
+  const enable = plugins.getByRole('switch', { name: 'Enable fixture', exact: true });
+  await enable.click();
+  await page.waitForFunction(() => document.querySelector<HTMLInputElement>('[aria-label="Enable fixture"]')?.checked === false);
+  assert.equal(enabled, false);
+  await plugins.getByRole('button', { name: 'Fixture plugin', exact: true }).click();
+  const detail = page.getByRole('dialog', { name: 'Fixture plugin', exact: true });
+  await detail.getByText('Synthetic plugin details', { exact: true }).waitFor();
+  await detail.getByRole('button', { name: 'Uninstall', exact: true }).click();
+  await detail.getByRole('button', { name: 'Confirm uninstall', exact: true }).click();
+  await plugins.getByRole('button', { name: 'Install fixture', exact: true }).click();
+  await enable.waitFor();
+  assert.equal(installed, true);
+  await plugins.getByRole('searchbox', { name: 'Search plugin directory' }).fill('fixture');
+  await plugins.getByRole('button', { name: 'Search directory', exact: true }).click();
+  await plugins.getByRole('button', { name: 'Fixture plugin', exact: true }).waitFor();
+  assert.equal(fake.calls('plugin/search').at(-1)?.params.searchTerm, 'fixture');
+  await plugins.getByRole('button', { name: 'Skills', exact: true }).click();
+  await plugins.getByRole('switch', { name: 'Enable Fixture skill', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector<HTMLInputElement>('[aria-label="Enable Fixture skill"]')?.checked === false);
+  assert.equal(skillEnabled, false);
+  await page.screenshot({ path: join(output, 'skills.png') });
+  checks.push('Plugin enable, details, uninstall, install and skill enable all complete through native RPCs');
+  assert.equal(terminalOperations.filter(operation => operation === 'create').length, 1);
+  assert.equal(terminalOperations.filter(operation => operation === 'close').length, 0);
+  await page.getByRole('button', { name: 'Fixture chat', exact: true }).first().click();
+  await editor.waitFor();
+  assert.equal(await originalEditor?.evaluate(node => node.isConnected && node === document.querySelector('[data-codex-composer]')), true);
+  assert.equal(await editor.textContent(), 'A draft survives every settings page');
+  await originalEditor?.dispose();
+  checks.push('Settings and plugin navigation leave the existing terminal running');
+  await page.keyboard.press('Control+,');
+  await settings.getByRole('link', { name: 'Appearance', exact: true }).click();
+  await page.reload({ waitUntil: 'commit' });
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark' && document.documentElement.dataset.reducedMotion === 'true');
+  assert.equal(await content.getByRole('spinbutton', { name: 'UI font size', exact: true }).inputValue(), '16');
+  checks.push('A direct settings reload starts the source renderer and restores saved preferences');
+  await page.setViewportSize({ width: 430, height: 932 });
+  await page.getByRole('button', { name: 'Hide sidebar', exact: true }).click();
+  const categoryBounds = await settings.boundingBox(), titlebarBounds = await page.locator('.yard-source-titlebar').boundingBox();
+  assert.ok(categoryBounds && titlebarBounds && categoryBounds.y >= titlebarBounds.y + titlebarBounds.height,
+    'Mobile settings must stay below the application navigation buttons');
+  await page.screenshot({ path: join(output, 'appearance-mobile.png') });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.goto(app.url + '/local/' + threadId, { waitUntil: 'commit' });
+  await editor.waitFor();
+  assert.equal(await editor.textContent(), 'A draft survives every settings page');
+  checks.push('The conversation draft remains after all tool pages and explicit reloads');
+  assert.ok(!resources.some(url => /(?:workbench-pinned-entry|app-initial-|settings-entry-).*\.js(?:$|\?)/.test(url)), 'Native routes must never fetch the pinned renderer');
+  assert.deepEqual(errors, []);
+  report.ok = true;
+} catch (error) {
+  report.ok = false; report.failure = String(error); process.exitCode = 1;
+  await page.screenshot({ path: join(output, 'failure.png') });
+  await writeFile(join(output, 'failure.txt'), await page.locator('body').ariaSnapshot());
+} finally {
+  report.documents = documents;
+  report.resources = resources.filter(url => /\.js(?:$|\?)/.test(url));
+  await writeFile(join(output, 'result.json'), JSON.stringify(report, null, 2));
+  await browser.close(); await app.close(); await fake.close(); await rm(root, { recursive: true, force: true });
+  console.log(JSON.stringify(report));
+}

@@ -1,0 +1,1 @@
+import{__awaiter as i}from"../../../../../../lib/js/oai_js/node_modules/tslib/tslib.es6.js";import{sky_linux as t}from"./sky_linux.js";function o(o){return function(e){return i(this,void 0,void 0,(function*(){yield o.action_settler.wait(),yield t("clipboard_write",{options:o,input:e}),o.action_settler.defer()}))}}export{o as create_clipboard_write};

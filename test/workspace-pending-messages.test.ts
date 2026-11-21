@@ -35,11 +35,30 @@ test('canonical receipts replace preparations by client ID, including receipts b
 });
 
 test('new turns and rejected submissions do not alter saved conversation history', () => {
-  const store = new PendingMessages(), message = { ...pending, turnId: undefined };
+  const store = new PendingMessages(), message = { ...pending, turnId: undefined, afterTurnId: turn.id };
   store.add('thread', message);
   const shown = withPendingMessages([turn], store.read('thread'));
   assert.equal(shown.length, 2);
   assert.equal(shown[1]?.items[0]?.preparing, true);
   store.remove('thread', message.id);
   assert.deepEqual(withPendingMessages([turn], store.read('thread')), [turn]);
+});
+
+test('new prompts retain their send position when turn notifications precede the user receipt', () => {
+  const previous: TurnSummary = { ...turn, status: 'completed' };
+  const started: TurnSummary = { id: 'next', status: 'inProgress', items: [] };
+  const message = { ...pending, turnId: undefined, afterTurnId: previous.id };
+  const shown = withPendingMessages([previous, started], [message]);
+  assert.deepEqual(shown.map(turn => turn.id), [previous.id, 'preparing:' + message.id, started.id]);
+  assert.equal(shown[1]?.items[0]?.preparing, true);
+  assert.deepEqual(started.items, [], 'The placeholder does not change the canonical turn.');
+  const receipt = { ...started, items: [{ id: 'saved', type: 'userMessage', clientId: message.id }] };
+  assert.deepEqual(withPendingMessages([previous, receipt], [message]), [previous, receipt]);
+});
+
+test('prompts sent without a prior turn stay ahead of incoming work and retain submission order', () => {
+  const started: TurnSummary = { id: 'next', status: 'inProgress', items: [] };
+  const first = { ...pending, turnId: undefined }, second = { ...first, id: 'second-id' };
+  assert.deepEqual(withPendingMessages([started], [first, second]).map(turn => turn.id),
+    ['preparing:' + first.id, 'preparing:' + second.id, started.id]);
 });

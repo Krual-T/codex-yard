@@ -9,6 +9,11 @@ import { AccountUsageSummary, useConversationUsage } from './conversation-usage.
 import { rateLimitBuckets } from './conversation-metrics.ts';
 
 export const workspacePlugins = '/?initialRoute=/plugins';
+export function scheduledTasksUrl(returnRoute?: string) {
+  const query = new URLSearchParams({ initialRoute: '/automations' });
+  if (returnRoute) query.set('workspaceReturn', returnRoute);
+  return '/?' + query;
+}
 let petMounted = false;
 
 export function settingsUrl(section: string, returnRoute?: string) {
@@ -23,7 +28,7 @@ function mountPet() {
   petMounted = true;
 }
 
-export function SidebarProfile({ returnRoute }: { returnRoute?: string }) {
+export function SidebarProfile({ navigate }: { navigate(route: string): void }) {
   const usage = useConversationUsage(null, 'local');
   const id = React.useId();
   const helpId = React.useId();
@@ -73,7 +78,7 @@ export function SidebarProfile({ returnRoute }: { returnRoute?: string }) {
       if (event.defaultPrevented || event.repeat || event.isComposing) return;
       if (event.key === ',' && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) {
         event.preventDefault();
-        location.assign(settingsUrl('general-settings', returnRoute));
+        navigate('/settings/general-settings');
       } else if (event.code === 'KeyP' && event.altKey && event.metaKey && !event.ctrlKey && !event.shiftKey) {
         event.preventDefault();
         togglePet();
@@ -81,7 +86,7 @@ export function SidebarProfile({ returnRoute }: { returnRoute?: string }) {
     };
     window.addEventListener('keydown', shortcuts);
     return () => window.removeEventListener('keydown', shortcuts);
-  }, [returnRoute]);
+  }, [navigate]);
 
   function togglePet() {
     setError(undefined);
@@ -154,7 +159,9 @@ export function SidebarProfile({ returnRoute }: { returnRoute?: string }) {
       <button type="button" role="menuitem" tabIndex={-1} onClick={() => { closeProfile(); togglePet(); }}>
         <Ghost size={14} aria-hidden="true" />{petOpen ? 'Hide Pet' : 'Show Pet'}<kbd>Alt+Super+P</kbd>
       </button>
-      <a role="menuitem" tabIndex={-1} href={settingsUrl('general-settings', returnRoute)}>
+      <a role="menuitem" tabIndex={-1} href={settingsUrl('general-settings')} onClick={event => {
+        if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); closeProfile(); navigate('/settings/general-settings'); }
+      }}>
         <Settings size={14} aria-hidden="true" />Settings<kbd>Ctrl+,</kbd>
       </a>
       <div role="separator" />
@@ -174,7 +181,9 @@ export function SidebarProfile({ returnRoute }: { returnRoute?: string }) {
           if (event.defaultPrevented) event.stopPropagation();
         }}>
         <a role="menuitem" tabIndex={-1} href="https://developers.openai.com/codex/changelog" target="_blank" rel="noreferrer" onClick={closeProfile}>What's new</a>
-        <a role="menuitem" tabIndex={-1} href={settingsUrl('keyboard-shortcuts', returnRoute)}>Keyboard shortcuts</a>
+        <a role="menuitem" tabIndex={-1} href={settingsUrl('keyboard-shortcuts')} onClick={event => {
+          if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); helpSurface.current?.hidePopover(); closeProfile(); navigate('/settings/keyboard-shortcuts'); }
+        }}>Keyboard shortcuts</a>
         <a role="menuitem" tabIndex={-1} href="https://learn.chatgpt.com/docs/quickstart" target="_blank" rel="noreferrer" onClick={closeProfile}>User guide</a>
       </div>
     </div>

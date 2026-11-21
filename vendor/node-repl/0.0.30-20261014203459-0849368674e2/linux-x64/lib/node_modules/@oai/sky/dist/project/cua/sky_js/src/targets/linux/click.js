@@ -1,0 +1,1 @@
+import{__awaiter as i}from"../../../../../../lib/js/oai_js/node_modules/tslib/tslib.es6.js";import{sky_linux as t}from"./sky_linux.js";function e(e){return function(o){return i(this,void 0,void 0,(function*(){yield e.action_settler.wait(),yield t("click",{options:e,input:e.element_ids.resolve(o)}),e.action_settler.defer()}))}}export{e as create_click};

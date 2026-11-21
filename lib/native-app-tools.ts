@@ -20,7 +20,7 @@ export interface NativeAppToolsOptions {
   projectIdForStart?(project: NativeProject, hostId: string): Promise<string | null>;
   supportsSidebarState?(hostId: string): boolean;
   projectlessRoot: string;
-  configFor(hostId: string): Record<string, unknown>;
+  configFor(hostId: string, cwd: string): Record<string, unknown> | Promise<Record<string, unknown>>;
   globals: Record<string, unknown>;
   pins: {
     list(value: { hostId: string; signal?: AbortSignal }): Promise<{ threadIds: string[] }>;
@@ -245,9 +245,10 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
               await mkdir(cwd, { recursive: false });
             } else cwd = await mkdtemp(join(options.projectlessRoot, 'chat-'));
           }
+          const config = await options.configFor(hostId, cwd);
           signal.throwIfAborted();
           const { thread } = await connection.request('thread/start', { cwd, historyMode: 'paginated', ...(projectId ? { projectId } : {}), config: {
-            ...options.configFor(hostId), ...(args.thinking ? { model_reasoning_effort: args.thinking } : {}),
+            ...config, ...(args.thinking ? { model_reasoning_effort: args.thinking } : {}),
           }, ...(args.model ? { model: args.model } : {}) }, { mutating: true });
           try {
             await options.setMembership(thread.id, hostId, project, cwd, thread);
@@ -267,8 +268,9 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
           if (caller.callerSource === 'chatgpt' && threadId === caller.threadId) throw new Error('fork_thread cannot fork a ChatGPT-backed cloud Work conversation.');
           if (args.environment?.type === 'worktree') throw new Error('Managed worktree setup is not connected in this Yard host.');
           const value = await resolveThread(threadId, sourceHostId, signal);
+          const config = await options.configFor(value.hostId, value.thread.cwd);
           signal.throwIfAborted();
-          const forked = await value.connection.request('thread/fork', { threadId, historyMode: 'paginated', config: options.configFor(value.hostId) }, { mutating: true });
+          const forked = await value.connection.request('thread/fork', { threadId, historyMode: 'paginated', config }, { mutating: true });
           result = { threadId: forked.thread.id };
           break;
         }
@@ -289,8 +291,10 @@ export function createNativeAppToolHost(options: NativeAppToolsOptions) {
           signal.throwIfAborted();
           const loaded = await value.connection.request('thread/loaded/list', {});
           signal.throwIfAborted();
+          const config = !loaded.data.includes(threadId) ? await options.configFor(value.hostId, value.thread.cwd) : undefined;
+          signal.throwIfAborted();
           await value.connection.request('thread/resume', { threadId, excludeTurns: true,
-            ...(!loaded.data.includes(threadId) ? { config: options.configFor(value.hostId) } : {}),
+            ...(config ? { config } : {}),
           }, { mutating: true });
           result = await submit(value.connection, threadId, args.prompt!, args, caller, signal);
           break;

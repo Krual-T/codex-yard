@@ -1,222 +1,204 @@
-# Standalone capabilities and plugin setup
+# Original tools and standalone plugin setup
 
-Yard is an independent Codex client and capability host. Build, startup, conversations, plugin management and supported Computer Use must work with Codex App absent or closed. Node, the Codex CLI, the configured model provider and each plugin's documented system dependencies remain prerequisites. Checked-in App UI resources provide the reference interface; Yard supplies the runtime services.
+Yard selects independent tool transports for its local sessions. It shares the existing Codex backend and Codex home with other clients. Starting Yard does not edit `config.toml`, install plugins, reload MCP globally or stop a loaded session.
 
-## Choose the capability
+## Names and ownership
 
-| Capability | Standalone implementation | Setup |
+| Capability | Model-visible name | Implementation / prerequisites |
 | --- | --- | --- |
-| Session tools exposed as `codex_app` | Yard's checked-in adapter and Codex backend | Included with Yard; the tool namespace is historical and does not require the desktop App |
-| Persistent JavaScript | `yard-node` plugin, MCP server `yard_node` | Install the repository plugin and use standalone Node >=24.5 |
-| Desktop control | `yard-computer`, MCP server `yard_computer` | Explicit Linux X11 display or Windows driver; see below |
-| Local Word, PDF, spreadsheets, PPT and templates | `yard-artifacts` Skill and public Python libraries | Install the plugin, Python environment and rendering tools |
-| Browser/Chrome | Public Chrome DevTools MCP | Register the MCP and provide standalone Chrome |
-| Task titles | Existing Codex Task Title Organizer | Install its marketplace/plugin; review Hooks for automatic checkpoints |
-| Completion notifications | Yard Web Push | Follow [browser notification setup](browser-notifications.md) |
-| Remote connectors exposed as `codex_apps` | The connector's own server and account | Configure its supported MCP/OAuth endpoint; validate network and authorization separately |
+| Conversation management | `codex_app` | Original adapter and conversation kernel, hosted by Yard |
+| Persistent JavaScript | `node_repl`: `js`, `js_reset`, `js_add_node_module_dir`, hidden `turn_ended` | Original executable, independent Node and Codex CLI |
+| Computer Use | `computer-use:computer-use`, `@oai/sky` through `node_repl` | Original Sky library/helper; selected X11 desktop or independent Windows interactive host |
+| Word | `documents:documents` | Original Skill/scripts and copied file runtime |
+| PDF | `pdf:pdf` | Original Skill/scripts and copied file runtime |
+| Spreadsheet files | `spreadsheets:Spreadsheets` | Original Skill/scripts and `@oai/artifact-tool` |
+| PPT | `presentations:Presentations` | Original Skill/scripts and `@oai/artifact-tool` |
+| Personal templates | `template-creator:template-creator` | Original generator; its generated Skills live in the selected Codex home |
+| Chrome | `chrome:control-chrome` | Original Browser service/client, official browser extension, independent native messaging host |
+| In-app Browser | `browser:control-in-app-browser` | Original package and Yard-owned Chromium backend; no browser extension required |
+| Title organization | `codex-task-title-organizer:organize-codex-task-titles` | Install the existing title organizer separately; it is not one of the file plugins |
+| Connectors | `codex_apps` | Their own MCP endpoint, account and OAuth; independent from Yard's `codex_app` conversation tools |
+| Notifications | Yard Web Push | [Browser notifications](browser-notifications.md) |
 
-An `enabled = true` entry is a preference. Check that the package is installed, its Skill appears in the selected backend, its MCP connects, and an actual operation succeeds. The five App-oriented Office/template packages may require an additional artifact runtime. This repository does not provision that private runtime; `yard-artifacts` provides the local file workflow through public dependencies. Cloud document APIs, live Excel, OCR and advanced Office features have separate prerequisites.
+The five file plugins are separate packages with their original Skill names, descriptions, bodies, scripts and notices. Their short Yard setup paragraph replaces the App's workspace dependency loader with the package's `runtime.ts`. Native MCP descriptions, parameter schemas and annotations come directly from the original Node executable. Computer Use is a library behind that REPL, rather than a renamed `yard_computer` tool.
 
-## Install the Yard packages
+The repository includes original **Linux x64** Node/Sky/Chrome resources and original **Windows x64** Node/Sky/extension-host resources. The Yard server is validated on Linux, including WSL controlling a Windows desktop. Windows desktop access uses an independent host in the signed-in user session. Other architectures need matching original assets and platform validation. The original Node executable is compiled native code; it is copied, not translated into TypeScript. Yard's configuration and lifecycle adapters are TypeScript.
 
-Run on the **selected execution host** using the same Codex home as its Yard backend. A terminal's default home can differ from the daemon's home. Inspect the service's existing `CODEX_HOME` and `AGENTS_CODEX_BIN` before installing; keep existing credentials and policy settings.
+## What changes in a session
+
+New, forked, prewarmed, scheduled and cold-resumed local sessions read effective configuration for their **target working directory**. Yard replaces the `node_repl` transport as one table, retaining `enabled`, `required`, tool approvals and timeouts, and removes old App command/URL/pipe settings. Existing caller overrides are preserved. A failed configuration read stops that operation. SSH sessions use the execution host's configuration.
+
+Installed canonical packages are selected in the session. An installed duplicate from another marketplace is disabled only in that session. Installed `yard-node` is disabled there; `yard-artifacts` is disabled after all five replacements exist, and `yard-computer` after its replacement exists. Their source remains for existing installations and the earlier Windows driver; they are absent from the new marketplace catalog. Explicit legacy MCP entries in your configuration still need migration if they independently register a second server.
+
+A loaded conversation keeps the backend's current tools and kernel when opened from another client. Open a new conversation or fork to adopt the new runtime. If App and Yard race to cold-resume the same conversation, the backend's first loaded configuration wins. Yard does not execute diagnostic JavaScript to identify or reset that kernel. To keep an App toolset and a Yard toolset concurrently, use separate conversations on the same backend.
+
+MCP tools and Skills form part of the model context. Restoring names and schemas reduces avoidable differences; runtime paths, the setup paragraph, installed Skills and tool ordering can still change the prompt prefix. Cache hit rates have not been measured. See [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching).
+
+## Install packages once
+
+Run on the selected execution host, with the **existing backend's** Codex home. Keep the marketplace checkout at a stable path. Reuse an existing registration instead of creating another one.
 
 ```bash
-yard_codex_home=/absolute/path/to/the-existing-codex-home
+yard_codex_home=/absolute/path/to/existing-codex-home
 yard_checkout=/absolute/path/to/codex-yard
 CODEX_HOME="$yard_codex_home" codex plugin marketplace add "$yard_checkout"
-CODEX_HOME="$yard_codex_home" codex plugin add yard-node@codex-yard
-CODEX_HOME="$yard_codex_home" codex plugin add yard-artifacts@codex-yard
-CODEX_HOME="$yard_codex_home" codex plugin add yard-computer@codex-yard
+CODEX_HOME="$yard_codex_home" codex plugin add documents@codex-yard
+CODEX_HOME="$yard_codex_home" codex plugin add pdf@codex-yard
+CODEX_HOME="$yard_codex_home" codex plugin add spreadsheets@codex-yard
+CODEX_HOME="$yard_codex_home" codex plugin add presentations@codex-yard
+CODEX_HOME="$yard_codex_home" codex plugin add template-creator@codex-yard
+CODEX_HOME="$yard_codex_home" codex plugin add computer-use@codex-yard
+# Install these when their browser connection prerequisites below are ready.
+CODEX_HOME="$yard_codex_home" codex plugin add chrome@codex-yard
+CODEX_HOME="$yard_codex_home" codex plugin add browser@codex-yard
 CODEX_HOME="$yard_codex_home" codex plugin list
 ```
 
-Reuse an existing `codex-yard` marketplace registration. Keep its checkout at a stable path. On Windows, set `$env:CODEX_HOME` in PowerShell before the equivalent `codex plugin` commands. The CLI/backend must support native plugins; enable `[features] plugins = true` in its existing configuration if disabled. Merge into the existing section rather than adding a second `[features]` table. Installation does not grant tool approval or install operating-system dependencies.
+The backend must support native plugins; keep `[features] plugins = true` in its existing configuration if necessary. Plugin installation enables a package in the shared configuration. For Yard-only use, after installation set that new package's `enabled` to `false` in Codex Settings → Plugins or its existing `[plugins."documents@codex-yard"]` table (repeat for the other new packages). Yard enables installed replacements per session. Keep the existing App marketplace entries and other settings. This is a one-time installation choice; Yard startup performs no configuration writes. On PowerShell, set `$env:CODEX_HOME` before the equivalent CLI commands.
 
-Open a **new conversation on that host** and check for `yard-node:javascript`, `yard-artifacts:files` and `yard-computer:use-computer`. Confirm the `yard_node` and selected `yard_computer` tools connect, then run the acceptance actions below. Older loaded conversations can retain their original tool inventory. A successful CLI installation in another Codex home or backend does not update them.
+Open a new local Yard conversation and check Skills and MCP status, then run actual operations. `enabled = true` alone does not mean a package is installed or its external service is connected.
 
-## Persistent JavaScript
+Review the installed `computer-use` / browser hooks in Settings → Hooks and allow the selected hooks after inspection. Native Codex keeps new or changed hooks untrusted until this approval. Computer Use needs its `Stop`, `Interrupt` and `SubagentStop` hooks to release held input at turn end. Yard does not approve hooks automatically or write their trust state at startup.
 
-`yard_node.evaluate` runs ordinary Node JavaScript in one persistent child process per MCP session. It supports top-level await, redeclaration, console output, the final expression and image results:
+## Original Node REPL
+
+The pinned snapshot is `vendor/node-repl/0.0.30-20261014203459-0849368674e2/linux-x64`. It includes the original `node_repl`, Sky 0.7.8, its helper and shipped Statsig dependencies. Yard uses its own Node executable (`process.execPath`), or `YARD_NODE_REPL_NODE`, and the standalone Codex CLI from `AGENTS_CODEX_BIN` / `PATH`. It does not use `--disable-sandbox`.
+
+Set `YARD_NODE_REPL_ROOT` only for an independently prepared matching runtime root containing `bin/node_repl` (`.exe` on Windows) and `lib/node_modules`. Do not point it at a versioned App installation. Yard explicitly forwards its selected `CODEX_HOME` to Node REPL so the Browser service's auxiliary CLI reads the same configuration, including when Yard uses a custom home. CLI and runtime sandbox protocols must be compatible; Linux validation used **Codex CLI 0.169.1**, Node **24.16.0**, original runtime **0.0.30/20261014203459-0849368674e2**. These versions are separate from the pinned Yard UI.
+
+Use native dynamic imports, `nodeRepl.write`, `nodeRepl.emitImage` and the original context helpers:
 
 ```javascript
 let count = 41;
-await Promise.resolve();
-++count;
+nodeRepl.write(++count);
+const path = await import('node:path');
+nodeRepl.write(path.basename(nodeRepl.cwd));
 ```
 
-Run `count` in a second call and expect `42`. Import with `await yardNode.import('node:fs/promises')` or an installed package name. Package resolution starts in `process.cwd()`; use `process.chdir('/absolute/task/directory')` before task-local imports. Native `import()` inside the inspector evaluation has no module loader; use `yardNode.import`. Emit PNG/JPEG results with `yardNode.emitImage({bytes, mimeType})`.
+Bindings remain until native reset or kernel teardown. Timeout/cancellation behavior belongs to the original supervisor; Yard never retries submitted code. Closing a Yard page does not stop the backend-owned execution. The CLI's administrative `mcpServer/tool/call` path does not reproduce model-turn authority: test writes and desktop actions through an actual model turn. Keep the native approval and sandbox configuration in effect when testing.
 
-The kernel uses Node's in-process inspector API without opening a debug port. It does not implement App-specific `nodeRepl.rpc`, BrowserLib or notification pipes. Use the dedicated browser, computer and Yard notification integrations for those operations.
+Permission validation with CLI 0.169.1 found a concrete boundary: the default read-only conversation with `approval_policy = "never"` rejects the model's Node tool call. Explicit `mcp_servers.node_repl.tools.js.approval_mode = "approve"` authorizes execution and permits a repository write, even in that read-only conversation. The administrative tool-call endpoint also executes outside that model approval check. Yard preserves these native settings; it does not add `approve` for Node. Review an inherited explicit approval if you expect read-only execution. These probes verify native approval behavior, not an independent OS filesystem boundary after explicit tool approval.
 
-Evaluations are serialized. The default timeout is 30 seconds, adjustable to 60 seconds. Code and text output each have a 64 KiB limit; image output has an 8 MiB limit. `reset`, timeout, cancellation of a running evaluation, process exit and output overflow discard the kernel and invalidate already queued code from that generation. Cancelling a queued evaluation only cancels that call before its code starts. A new evaluation waits for the previous kernel to exit. Ordinary JavaScript errors keep the kernel usable. Files, network effects and separately spawned processes remain; cancelled code is never retried. The kernel runs under the MCP session's account and policy and is not a sandbox.
+## Prepare the original file runtime
 
-For lifecycle acceptance, start a delayed evaluation that writes a completion file, close Yard's page, and reopen the same conversation. The file and a retained variable must show that the backend completed the operation. Closing the page does not unload the backend-owned MCP; stopping/unloading the session or backend discards its in-memory state.
-
-After the standalone workflow passes, an old App-backed `mcp_servers.node_repl` entry can be disabled with its existing `enabled` setting. Retain its original values for rollback and update project instructions to call `yard_node`. Scripts that use private App RPC need migration to dedicated MCP tools. Removing the old entry or uninstalling the App is unnecessary for testing the replacement.
-
-## Local file artifacts
-
-Install a dedicated Python environment on the execution host, outside the plugin cache. For Linux:
+Prepare once from an already available, authorized **original primary runtime**. Copying its dependency tree is explicit; Yard startup does not download it or install OS packages.
 
 ```bash
-python3 -m venv /absolute/path/to/yard-artifacts-venv
-/absolute/path/to/yard-artifacts-venv/bin/python -m pip install -r "$yard_checkout/plugins/yard-artifacts/requirements.txt"
+npm run artifacts:prepare -- \
+  --source /absolute/path/to/original/codex-primary-runtime
 ```
 
-Use Python 3.11 or newer. On Windows, create the environment with `py -3 -m venv C:\path\yard-artifacts-venv`, then use its `Scripts\python.exe -m pip install -r ...`. Set `YARD_ARTIFACTS_PYTHON` to that interpreter in the environment available to the Codex execution tools, or put its absolute path in the project's instructions. Setting it only in a browser or an unrelated shell does not change the daemon's environment. The Skill uses the named interpreter; no Office MCP process is required.
+The default independent destination is `~/.local/share/codex-yard/artifact-runtime`. Use `--destination /absolute/private/directory` to select another new directory. Preparation validates platform/architecture, preserves relative symlinks and notices, stages the copy and renames it into place. It does not overwrite an existing destination. The source cache may then be unavailable; runtime operations use the copied tree.
 
-The pinned dependencies provide `python-docx`, `openpyxl`, `python-pptx`, `reportlab`, `pypdf` and Pillow. Their [Word](https://python-docx.readthedocs.io/), [spreadsheet](https://openpyxl.readthedocs.io/), [presentation](https://python-pptx.readthedocs.io/), [PDF authoring](https://docs.reportlab.com/) and [PDF reading](https://pypdf.readthedocs.io/) documentation describes supported file features. Local templates are copied and reopened with the matching library, preserving relevant styles, slide masters and formulas.
-
-For PDF export, layout inspection and formula calculation, install **Writer, Calc and Impress**, plus Poppler and suitable fonts. A `soffice` executable from `libreoffice-core` alone cannot load these file types. On Debian/Ubuntu:
+Each installed file plugin has `runtime.ts`, which returns `nodePath`, `pythonPath`, `nodeModulesPath`, `overrideBinDir` and `fallbackBinDir` from `runtime.json`. Run it with independent Node. For a custom destination, pass the manifest explicitly:
 
 ```bash
-sudo apt install libreoffice-writer libreoffice-calc libreoffice-impress poppler-utils fonts-noto-cjk
+node /absolute/installed/documents/runtime.ts /absolute/private/directory/runtime.json
 ```
 
-On other systems, install [LibreOffice](https://www.libreoffice.org/download/download-libreoffice/) and a Poppler distribution supported by that environment, and make `soffice`, `pdftoppm` and `pdfinfo` available. `YARD_ARTIFACTS_SOFFICE` can name an absolute LibreOffice executable. These are file-based tools; a running Microsoft Office installation is unnecessary. Actual platform validation is recorded under Verification below.
+Alternatively set `YARD_ARTIFACT_RUNTIME_MANIFEST` in the **actual execution process**. Setting it only in Yard's `.env` does not change an already-running Codex daemon or its shell tools. Use the returned interpreter paths. Link the returned `nodeModulesPath` as `node_modules` in a private build directory for authored `.mjs` imports, put the returned override directory first on that command's PATH, and use fallback binaries as needed. No global npm/Python installation is required.
 
-Accept the setup by creating and reopening one `.docx`, `.xlsx`, `.pptx` and PDF, and editing a copy of a template. Recalculate a workbook containing `=SUM(B2:B3)` with inputs `20` and `22`, then reopen it with `openpyxl.load_workbook(..., data_only=True)` and expect `42`. `openpyxl` stores formulas without calculating them. Export the document and deck to PDF with a private LibreOffice profile, then render and inspect pages:
+The validated original Linux bundle is **26.909.61513**, `@oai/artifact-tool` **2.8.59**, with its Node/Python, LibreOffice and Poppler. The original document renderer locates the copied LibreOffice relative to its Python interpreter. Cloud Docs/Slides/Sheets exports and `spreadsheets:excel-live-control` require their authorized connectors; their presence in package metadata does not supply an account. Local files and the original personal-template generator work independently. The generator writes only to the chosen `CODEX_HOME/skills`; test it with a disposable home before personal installation.
 
-```bash
-soffice -env:UserInstallation=file:///absolute/task/lo-profile --headless --convert-to pdf --outdir /absolute/task/rendered /absolute/task/document.docx
-pdftoppm -png /absolute/task/rendered/document.pdf /absolute/task/rendered/document
-```
+## Computer Use on Linux
 
-Inspect the PNGs for clipping, missing glyphs and overlap. A successful save does not establish layout fidelity. Existing redlines, macros, SmartArt, animation and live/cloud documents require their own supported workflow and checks.
-
-## Browser and Chrome
-
-The public [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) works with standalone Chrome and Node. Register a pinned version in the same Codex home, for example with a separate headless browser profile:
-
-```bash
-CODEX_HOME="$yard_codex_home" codex mcp add chrome_devtools -- npx --yes chrome-devtools-mcp@1.12.0 --headless --isolated --no-usage-statistics --no-performance-crux
-CODEX_HOME="$yard_codex_home" codex mcp list
-```
-
-Provide `--executablePath=/absolute/path/to/chrome` if Chrome is not found. The first `npx` run needs npm registry access; for a service with restricted network/PATH, install that pinned package in a stable private tool directory and register its entry point with an absolute standalone Node path. No App resource path is needed.
-
-To operate an existing, authorized browser instead, use the server's `--browserUrl=http://127.0.0.1:9222` or supported `--autoConnect` setup. Remote debugging must already be enabled by the browser owner. Keep CDP on loopback and use a dedicated debugging profile; a WSL loopback address may refer to a different network namespace from Windows Chrome. Do not expose the debugging port or replace the user's default profile as a connection workaround.
-
-Open a new conversation and perform a real navigation, snapshot, text fill and click on a disposable test page. A connection plus a list of tools does not verify browser control. Browser/Chrome Skills that call private App BrowserLib need to use this MCP's tools for the standalone workflow.
-
-## Titles, notifications and remote connectors
-
-The existing [title organizer installation guide](https://github.com/znbsf/codex-task-title-organizer/blob/main/INSTALL.md) provides its own marketplace:
-
-```bash
-CODEX_HOME="$yard_codex_home" codex plugin marketplace add znbsf/codex-task-title-organizer --ref main
-CODEX_HOME="$yard_codex_home" codex plugin add codex-task-title-organizer@codex-task-title-organizer
-```
-
-It needs Python 3 with `sqlite3` on the execution host. Review and trust its specific Hooks through the backend's supported Hooks interface before expecting automatic checkpoints. Manual Skill availability and automatic Hook execution are separate checks. Follow the upstream upgrade/refresh procedure for loaded tasks; validate a successful title-tool call and its next checkpoint. Yard already hosts the session/title tools; no desktop App is needed for those calls.
-
-Use [Yard Web Push](browser-notifications.md) for completion notifications. An old hook pointing into a versioned Windows App directory or private pipe is not part of Yard's notification setup.
-
-`codex_apps` remote connectors and Yard's `codex_app` session tools have different owners. For a remote connector, register its documented MCP endpoint with `codex mcp add`, complete its supported OAuth flow and test one account-authorized read. Yard forwards native MCP/OAuth operations. Endpoint reachability, subscriptions and server-side authorization remain prerequisites; another machine's failed connection is not a known-good reference. Never copy another user's token store to repair access.
-
-## Remove or undo an integration
-
-In the same Codex home, use `codex plugin remove yard-node@codex-yard` (or the other package name) and `codex mcp remove chrome_devtools` for registrations created during setup. Remove the marketplace with `codex plugin marketplace remove codex-yard` only when no remaining packages use it. Existing loaded sessions can retain processes until unloaded. Retain user-created files, model credentials and unrelated configuration.
-
-The built-in Computer mount is independently selected by Yard's `.env`; remove only its `YARD_COMPUTER_*` selection and start a new conversation to stop adding it. Plugin removal alone does not undo that explicit mount. Remove an artifact environment only after confirming it contains no deliverables or shared dependencies.
-
-## Common connection failures
-
-| Symptom | Check and action |
-| --- | --- |
-| Enabled plugin has no Skill/tool | Install in the selected host's actual Codex home, inspect `codex plugin list`, then verify a new conversation's inventory |
-| Linux reports `Exec format error` for `npx.cmd` | Use Linux Node/npx for a Linux MCP such as Draw.io. A Windows `.cmd` launcher cannot execute directly as a Linux program |
-| A tool points into a versioned Windows App or `/usr/lib/chatgpt` directory | Register its standalone executable/package instead; App upgrades can remove those installation paths |
-| Windows Computer has no interactive desktop | Check the actual Windows process session and unlock state; a connected SSH session is commonly Session 0 |
-| Screenshot coordinates do not match the intended screen | Read the returned driver/display and dimensions. WSLg/X11 and the Windows primary monitor are different targets |
-| File generation works but export/recalculation fails | Verify the selected Python interpreter, Writer/Calc/Impress components, Poppler and fonts; inspect actual converted content |
-| MCP gets HTTP 401/403, TLS failure or timeout | Verify that endpoint's account/authorization and route from the backend host. A successful npm/GitHub request does not verify another service |
-| OAuth opens an unreachable loopback URL | Use the connector's supported callback/tunnel configuration on the backend host; the Yard browser and backend can be on different machines |
-
-Preserve `enabled:false` and per-tool approval settings when reconnecting a service. Connection repair does not require changing the user's permission policy. WSL startup, inherited Codex-home permissions, SSH identities and missing old working directories are host-administration concerns; diagnose them in the actual service environment without rewriting them as plugin installation steps.
-
-## Plugin management
-
-The original Plugins page uses the selected execution host's Codex connection. Yard forwards marketplace addition/removal/upgrade, plugin listing/search/read/install/uninstall/reconciliation and sharing, Skill reads, MCP OAuth and MCP resource/tool/event requests. Codex owns package installation, configuration, credentials and MCP process lifecycle. Yard does not copy its plugin registry or token store.
-
-An installation response means the backend accepted/completed that installation according to its native protocol. An interrupted write can already have changed the backend: Yard preserves the error and never replays it. Refresh the installed list before repeating a user operation. MCP completion and event notifications use the same host connection.
-
-Open Plugins to install from an existing marketplace. Add the Yard checkout as a local marketplace to find its packages. A local path refers to the selected Codex host. Network marketplaces and services still require network access and, where applicable, a logged-in account.
-
-OAuth callbacks execute on the backend machine. In a cross-device or SSH deployment, use the MCP server's supported callback configuration and an existing reachable HTTPS endpoint or tunnel. A loopback URL on the backend is not reachable merely because the remote browser can open Yard. App-specific plugins also need their actual host service; installing a package does not start that service.
-
-## Linux Computer Use setup
-
-Yard includes its own `yard-computer` MCP runtime under `plugins/yard-computer/`. Its default Linux driver uses X11 screen 0, `xdotool`, ImageMagick `import`, `xclip` and `flock` from util-linux. Select a local display such as `:0`, `:99` or `:99.0`. It has no dependency on Codex App binaries, private App sockets or an App browser window. Other X11 screens, native Wayland and macOS are outside the supported drivers.
-
-Install the system tools on the machine that will run the desktop. On Debian/Ubuntu:
-
-```bash
-sudo apt install xdotool imagemagick xclip util-linux
-```
-
-In Yard's `.env`, explicitly select that machine's X11 display and, if needed, its authorization file:
+Install `computer-use`, select an X11 screen 0 explicitly, and make its accessibility session available to Yard:
 
 ```dotenv
 YARD_COMPUTER_DISPLAY=:0
-YARD_COMPUTER_XAUTHORITY=/path/to/.Xauthority
+# If this desktop requires an authority file:
+# YARD_COMPUTER_XAUTHORITY=/absolute/path/to/.Xauthority
 ```
 
-Start Yard normally and open a new local conversation with a model/provider that supports image inputs and tool calls. Ask it to take a Computer screenshot, then operate the application. The screenshot appears in the normal MCP tool result. The display selection remains on the Yard machine when a phone or another computer opens its web interface. Existing loaded conversations retain their original MCP configuration; use a new conversation to adopt the setting. Closing the web page leaves the daemon's tool process available for the conversation.
+Start Yard from the selected desktop's session, or supply that session's `DBUS_SESSION_BUS_ADDRESS` (and `AT_SPI_BUS` / `XDG_RUNTIME_DIR` when used) in its environment. Yard forwards these values in the per-session MCP definition because an existing daemon does not inherit its launch environment. The desktop needs X11 libraries, a D-Bus session, AT-SPI services and an application with accessibility enabled. Screenshot and coordinate actions can work through the X11 fallback; original clipboard/text and accessibility actions need AT-SPI. Native Wayland is not covered by this validation.
 
-Yard passes explicit transport, environment and timeout fields for `mcp_servers.yard_computer` when starting/forking or cold-resuming local conversations. Native conversation tools and the scheduler use the same configuration source. Dotted field overrides preserve an existing `enabled:false` and per-server or per-tool approval policy. This works with an already-running daemon and leaves its saved global configuration intact. The built-in mount is controlled by Yard's display setting and the backend's `mcp_servers.yard_computer` settings, independently of installing or uninstalling the package. The package supplies the Skill and a standalone transport for other clients. An explicit same-name definition takes precedence over that package transport; configure the built-in server's policy under `mcp_servers.yard_computer`. SSH conversations use their execution host's configured tools; Yard does not redirect them to the server's local desktop.
+A headless host can use its own Xvfb desktop and `dbus-run-session`, with applications started inside the same session. Tests use that isolated arrangement and never select the operator's desktop. Sky's original helper owns screenshot, window/tree, clipboard, click and text behavior. Yard's small service adapter releases held keys and drag handles for their originating turn on `Stop`, `Interrupt` and `SubagentStop`; plugin hooks call the original hidden `turn_ended` tool. Keep the plugin enabled and its hooks trusted in the conversation.
 
-A headless host needs a virtual desktop, plus the applications to control. For example, install `xvfb`, start a private X11 session using the host's normal session/access controls, and set `YARD_COMPUTER_DISPLAY` to its display number. Keep that session running with Yard. Tests use a temporary Xvfb display and a disposable browser; they never connect to the operator's desktop.
+The original Linux helper releases keys on exit but can leave an active drag button held. A small Yard stdio forwarder preserves the native protocol and, when its parent exits, ends only a drag started through that helper. It waits for the original cleanup response before closing the helper. This covers cancellation/reset that destroys the trusted-service process before turn hooks can run; it adds no desktop API or persistent service.
 
-On a compositing X11 desktop, check that a screenshot includes a newly opened application before sending input. If ImageMagick omits that window, set `YARD_COMPUTER_IMPORT` to an executable wrapper that calls `import -descend "$@"`. The [`-descend` option](https://imagemagick.org/import/) reads the window hierarchy. This setting was needed for the deployed KDE X11 desktop on 2026-11-08; screenshots, clicks and Chinese text replacement then passed through the production Yard connection. A user-local ImageMagick installation can put its library/module environment in the same wrapper.
+## Windows desktop from WSL
 
-## Windows Computer Use setup
+Install independent Windows Node.js (24.5 or later) and a native Windows Codex CLI `.exe`. The Linux CLI remains the conversation backend. The original Windows desktop helper also needs a Windows CLI and a private Windows Codex home for its own control process; it does not use the App installation or replace the shared WSL backend.
 
-The same `yard_computer` MCP has an explicit Windows driver, using standalone **Windows Node >=24.5**, Windows PowerShell, .NET and public User32/GDI APIs on Windows 10 version 1703 or newer. Its process must belong to the signed-in, unlocked interactive desktop. SSH/service Session 0, UAC secure desktops and elevated target windows are unsupported. It captures and controls the **primary monitor** with physical pixel coordinates starting at its top left. Windows uses Unicode `SendInput` and leaves the clipboard untouched.
+Run the setup with standalone Node from this checkout. It previews changes first; `--apply` prepares the copied runtime, backs up the previous host/task configuration and registers the current user's **interactive**, limited-privilege logon task:
 
-For a Linux/WSL Yard, make `plugins/yard-computer/` available at a stable Windows-readable location and explicitly configure both paths in Yard's `.env`:
+```powershell
+node scripts/install-windows-computer.ts --codex C:\standalone\codex.exe
+node scripts/install-windows-computer.ts --codex C:\standalone\codex.exe --apply
+```
+
+`--auth-source` selects an existing authorized `auth.json`; the default is the Windows user's `.codex/auth.json`. The private helper home receives that file without the old App's config, model catalog or MCP paths. `--destination`, `--codex-home`, `--task-name` and `--pipe` select explicit locations. Keep the generated backups private. Windows must be signed in with its desktop unlocked. SSH-created processes normally run in Session 0 and cannot substitute for this interactive host.
+
+Windows native Node REPL also needs a user-interactive session: the copied executable completed `initialize`, `tools/list` and JavaScript under an interactive task with independent Node 24.11.1. The same probe from SSH Session 0 failed to start its kernel with `0xC0000142`; changing Node versions did not resolve that environment restriction. The supported Yard deployment described here runs the Linux REPL in WSL and uses the interactive Windows host for desktop actions.
+
+Set these in the WSL Yard service's `.env`, then open a new Yard conversation:
 
 ```dotenv
-YARD_COMPUTER_DRIVER=windows
-YARD_COMPUTER_WINDOWS_NODE="/mnt/c/Program Files/nodejs/node.exe"
-YARD_COMPUTER_WINDOWS_SERVER="C:/yard-tools/yard-computer/server.ts"
+YARD_COMPUTER_TARGET=windows
+YARD_WINDOWS_NODE="C:\Program Files\nodejs\node.exe"
+YARD_WINDOWS_SKY_PIPE=\\.\pipe\codex-yard-computer-use
 ```
 
-The copied folder needs `server.ts`, `desktop.ts`, `windows.ts` and a parent `package.json` with `"type":"module"`. Preserve that complete package when upgrading. A Windows-visible UNC path to the same source is also possible when the selected Node account can read it. `--driver=windows` is carried in the MCP argv because WSL environment variables do not automatically propagate into Windows programs.
+Do not also select `YARD_COMPUTER_DISPLAY`. WSL forwards the original helper protocol through the private named pipe. The Windows host owns the original helper, its Windows parent PID and input release. Disconnect cleanup waits for pending operations, sends the original `end_turn` and `close`, and reports cleanup failures. The Skill reads `sky.target` and chooses the original Windows reference before using its window/screenshot arguments.
 
-Launching a Windows executable from WSL does not by itself grant access to the logged-in desktop. Verify the actual process session. If it runs in Session 0, arrange the service within the logged-in user's supported interactive-session setup before using this driver. The driver reports the condition and sends no input; it does not alter startup settings or attempt a session/security bypass. Yard's main server remains validated on Linux; this driver does not establish native Windows support for every Yard host feature.
+To remove this host, finish active desktop work, stop and unregister its named scheduled task, and retain or remove its private installation as needed. The installer prints the private backup's `restore.ps1` command. That script restores the previous host, runtime, authentication and task registration; it leaves the restored task stopped for inspection before starting it. Keep the shared WSL Codex home and daemon intact.
 
-When installing the plugin directly into a Windows Codex backend, select `YARD_COMPUTER_DRIVER=windows` in the MCP process environment or explicitly register `node C:\path\server.ts --driver=windows` as `yard_computer`. Use independent Node, a stable package path and the existing MCP approval policy. Keep only one active same-name transport definition.
+## Chrome and Browser connection
 
-Run `node scripts/verify-computer-windows.ts` from an **idle Windows desktop session** to exercise the real driver against its own temporary test window. It requires 60 seconds of initial desktop inactivity and stops if the window loses focus. Evidence stays in a temporary directory or `YARD_WINDOWS_EVIDENCE`; inspect its report and PNGs, then remove them. It does not change existing applications or clipboard data.
+The original Browser/Chrome client, trusted browser service, documentation and **Linux x64** native extension host are copied into their respective packages. Yard binds the trusted `browser` service when either package is installed. Chrome still requires the official browser extension and native messaging registration pointing at the stable **copied** extension host; an App-version path can break after App upgrades.
 
-## Computer actions and failure behavior
+For an explicit Chrome setup, inspect the installed Chrome package's `scripts/installManifest.mjs`. It exports `install`; directly executing the module does not perform registration. Save and run this `.mjs` script with standalone Node, replacing the absolute paths with stable independent paths:
 
-The `computer` tool supports screenshots, mouse movement, single/double/triple clicks, dragging, text entry, key combinations, scrolling and a wait of up to two seconds. Coordinates use the full desktop's absolute pixels. Each successful operation returns a PNG plus the display, width and height; observe a screenshot before choosing coordinates. Input bounds and key names are checked before execution. Screenshots travel in tool results and are not written to disk by the runtime.
+```javascript
+import { install } from '/absolute/installed/chrome/scripts/installManifest.mjs';
+await install({ appServerRuntimePaths: {
+  codexCliPath: '/absolute/path/to/standalone/codex',
+  nodePath: '/absolute/path/to/standalone/node',
+  nodeReplPath: '/absolute/yard/vendor/node-repl/0.0.30-20261014203459-0849368674e2/linux-x64/bin/node_repl',
+} });
+```
 
-On Linux X11, ASCII text uses keyboard events in the focused application. Unicode text updates X11 PRIMARY with the new text, checks that it can be read back, then uses a middle click: click the editable target and keep the pointer over it. To replace text, select it and delete it with Backspace before typing. The application must support middle-click paste. PRIMARY keeps the new text, served by an xclip owner until another selection replaces it or the X session ends. This also lets slow applications read the text later. The runtime never writes the main CLIPBOARD, including its images and rich text. Each call accepts at most 1000 characters; split longer text across calls.
+This is an administrative setup command: on Linux it writes NativeMessagingHosts manifests for supported browsers, and on Windows the original installer also writes HKCU registration. It is not run by Yard startup or tests against a personal profile. Use the host binary matching the browser's OS/architecture; a WSL Linux host cannot replace the Windows native host. Retain existing manifests for rollback and validate with the installed extension's diagnostics. Account/browser authorization remains with the original extension.
 
-The Node MCP adapter communicates over stdio. The daemon owns tool approvals and process lifetime. The runtime preserves the session's approval rules. A per-X-server OS lock serializes the complete action and following screenshot across separate MCP processes, so two conversations cannot interleave a drag. Another conversation can change the screen between calls; take a fresh observation when switching tasks. A crashed parent releases its lock through pipe closure.
+For Windows Chrome from WSL, use the Windows native host and standalone Windows executables. `node scripts/install-windows-chrome.ts --codex C:\standalone\codex.exe` previews registration; `--apply` backs up the original manifest/registry registration and copies the Chrome package to a stable Windows directory. Reconnect the official extension afterwards. Set `YARD_CHROME_WINDOWS=true` and `YARD_WINDOWS_NODE` in WSL Yard. Yard bridges only extension backends, excluding an App-owned `iab`. Multiple connected Chrome profiles require an explicit `YARD_CHROME_WINDOWS_PIPE` selector. A missing extension remains a browser installation prerequisite; package installation alone does not establish a working Chrome connection.
 
-MCP cancellation aborts the matching request while it is queued, waiting for a desktop lock or executing a command. Each input command checks cancellation before starting. Closing the stdio session or a normal SIGTERM/SIGINT cancels pending calls, interrupts child commands and lets a drag release its mouse button before releasing the display lock. A hard process kill or machine failure can interrupt that cleanup; inspect the desktop before continuing after such a failure.
+`YARD_BROWSER_BACKEND_PATHS` supplies compatible socket paths, separated by the execution platform's path-list delimiter. This explicit list replaces the original service's default socket discovery. Yard adds its configured IAB and Windows Chrome bridge sockets to the list. When combining Yard IAB with Linux Chrome, also put the actual independent extension socket in `YARD_BROWSER_BACKEND_PATHS`; otherwise only IAB will be discovered. Retain existing manifests for rollback and validate with the installed extension's diagnostics. Chrome's platform registration and framing are described in the [official native-messaging documentation](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging); WSL path/argument handling follows [Microsoft's interoperability documentation](https://learn.microsoft.com/en-us/windows/wsl/filesystems).
 
-Input is never retried. If an input command or its following screenshot fails, the result states that the desktop may already have changed. Inspect a new screenshot before deciding whether to repeat an action. A drag attempts to release its mouse button even after an intermediate failure. Missing dependencies, display access and unsupported platforms produce explicit errors without falling back to another desktop.
+## In-app Browser without an extension
 
-Cancellation stops further input and waits for child-process and mouse-button cleanup. Pointer movements, text already entered and changes to PRIMARY remain in effect.
+Install `browser@codex-yard` and an independent Chromium executable, then set:
 
-Windows serializes complete input-and-screenshot calls with a per-session named OS mutex. Each finite helper checks cancellation before submitting input and while waiting; it attempts key/button release after a partial `SendInput` result. Cancellation waits for helper exit and mutex cleanup, with a five-second forced-stop fallback if the helper is stuck. Hard termination can interrupt cleanup. Input and its effects are never rolled back or replayed; take a fresh screenshot after failure. Two conversations can still change the desktop between calls.
+```dotenv
+YARD_BROWSER_EXECUTABLE=/absolute/path/to/chromium
+YARD_BROWSER_HEADLESS=true
+```
 
-## Verification
+Yard starts Chromium lazily and hosts the original `iab` pipe contract. The original Browser Skill/client/service still implement DOM reading, Playwright actions, screenshots and their approvals. No GPT/ChatGPT browser extension, App process or App resource path is required. In a local chat, open a tool tab and select **Agent Browser** to see and interact with the same tabs as the Agent. Closing the panel or resetting Node REPL preserves the host's pages. The original Stop hook closes temporary Agent-created tabs; `markHandoff` / `markDeliverable` and user-created tabs survive. Different conversations receive separate tabs.
 
-`npm run typecheck` and `npm test` cover the protocol bridge, MCP framing and failures, explicit desktop configuration and the driver contract without a graphical session or App installation. `npm run test:plugins:cli` checks plugin installation/removal and Skill/MCP loading in an isolated real CLI home. `npm run test:computer:cli` additionally needs Xvfb, ImageMagick, xdotool, xclip and Chromium. It checks a disposable desktop, image delivery and actual mouse/keyboard effects through an isolated CLI and a scripted local model provider. These checks use no personal model account or conversations.
+This host currently accepts unrestricted network policy only. It rejects a restricted policy before attaching or executing browser actions because worker/frame coverage is incomplete. Keep native policy and approval settings; the host does not silently weaken a restriction. Chromium retains its normal OS sandbox. Supply a correctly configured executable; Yard does not download a browser or disable its sandbox at startup. The browser profile stays under Yard's private data directory. Browser tabs belong to the running Yard service; a service restart closes its browser process.
 
-For release validation, run the checks from a clean checkout while masking the desktop App installation directories. Record the actual CLI version separately from the pinned UI version. Real account OAuth, platform-specific plugins and a user's physical desktop require their own environment validation.
+## Connectors, titles and deployment checks
 
-On 2026-11-21, a clean source export including the latest local main changes, with `/usr/lib/chatgpt`, `/opt` and the user's plugin cache masked, passed type checking, all **429 portable tests** and **11 real CLI/plugin/UI lifecycle checks**, using standalone Node `24.16.0` and Codex CLI `0.169.1`. Persistent JavaScript and an image result passed; an already-started evaluation completed after the Yard WebSocket disconnected, and its variable survived reconnection. Direct MCP calls used no model account or model request.
+Configure `codex_apps` with its supported endpoint and account; validate OAuth and network on the execution host. The local connector failed in the initial comparison and was not a healthy baseline. An App-independent Yard conversation host does not provide third-party connector credentials. Use the existing title-organizer plugin for its Skill/hooks, and Yard Web Push for completion notifications rather than old Windows App paths/pipes.
 
-The public Chrome DevTools MCP `1.12.0`, registered through `codex mcp add` in a disposable CLI home, passed actual navigation, snapshot, text fill and button click against a local fixture under the same App/cache masks. Python `3.14.2` with the pinned artifact dependencies created and reopened all four file types, reused Word/PPT templates, recalculated the spreadsheet total to `42`, and exported documents/slides with LibreOffice `24.2.7.2`. Poppler page PNGs were visually inspected, including Chinese text. The Office validation used isolated public packages and rendering components.
+| Symptom | Check |
+| --- | --- |
+| Plugin enabled but no Skill | Correct backend/Codex home, installed package, enabled session and new conversation |
+| Permission warnings in WSL | Linux user's own Codex home/ownership; avoid inheriting Windows `CODEX_HOME` |
+| Service cannot find Linux Node | Independent Linux Node on the service PATH; a Windows Node path does not provide it |
+| SSH alias unavailable in WSL | The WSL user's SSH configuration, key access and reachable target/port |
+| Old thread cannot start a tool | Its stored cwd still exists; do not silently redirect execution |
+| MCP URL fails | Backend-side DNS, proxy, TLS, supported endpoint and login, followed by an actual tool call |
+| OAuth callback unreachable | Callback/tunnel configuration on the backend; remote browser loopback differs from backend loopback |
+| Chrome host missing after App upgrade | Native messaging manifest uses a stable independent host path |
+| Read-only Node or desktop denial | Effective project/turn/tool policy and CLI/runtime metadata; keep sandbox enforcement |
 
-Windows 11 with standalone Windows Node `24.11.1` and PowerShell `5.1.26100.9818` passed a `2560 × 1440` primary-monitor screenshot, Unicode input, a received Ctrl+A shortcut and selection replacement, wheel events, click, drag, cancellation and subsequent mutex recovery in the temporary WinForms fixture. The clipboard sequence stayed unchanged. Node filesystem permissions were restricted to the temporary test tree; the helper used Windows system APIs. The App remained installed during this Windows run, and neither its process nor the deployed Yard was stopped. Linux X11's earlier physical/virtual desktop acceptance remains recorded below; no new X11 behavior was added in this change.
+Keep each execution host's configuration and prerequisites explicit. Updating Yard does not repair unrelated SSH aliases, network settings or historical working directories.
 
-On 2026-11-08, a clean checkout with `/usr/lib/chatgpt` and `/opt` masked passed type checking, all 209 tests, the seven plugin lifecycle/UI checks and the real CLI computer checks. Codex CLI `0.164.0` and reference UI `26.1013.40934` completed 20 consecutive Unicode replacements, 15 image-bearing MCP calls, display actions, policy preservation and continuation after the Yard connection closed. PRIMARY remained readable 300/500 ms after input; the main CLIPBOARD PNG stayed intact. The model provider and desktop were isolated fixtures; no personal account or physical desktop was used.
+## Validation and rollback
+
+Run `npm run typecheck` and `npm test`. `node scripts/verify-plugins.ts --ui` uses a disposable CLI home to install/uninstall all eight packages, check exact original descriptors, render Plugins and test disconnect/reset. `dbus-run-session -- node scripts/verify-original-runtime.ts` additionally needs Xvfb (`AGENTS_TEST_XVFB` or the test fixture path) and disposable Chromium; it exercises the actual model/tool path, default MCP approval denial and an explicit per-tool-approved write without an external model. `node scripts/verify-artifact-runtime.ts` exercises original file generation/rendering and template create/update against the prepared manifest. `node scripts/verify-original-iab.ts` runs the original Browser client/service through native Node REPL and a disposable CLI/model loopback, including shared panel state, lifecycle, reset and rejection of restricted network policy.
+
+For standalone acceptance, mask the App installation and the original primary-runtime cache while those probes run. Evidence, runtime copies and outputs remain private under `.local/`; no account or conversation data belongs in Git. Upstream provenance and retained terms are listed in [THIRD_PARTY.md](../THIRD_PARTY.md).
+
+To roll back, revert this session-configuration change and remove only packages installed for this migration. Keep the previous App plugin entries and configuration. The backend retains loaded sessions until their normal unload; no shared daemon restart is required. Keep generated user documents and template Skills unless their owner requests removal.

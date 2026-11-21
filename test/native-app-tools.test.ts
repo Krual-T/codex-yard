@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { test, type TestContext } from 'node:test';
 import { setImmediate } from 'node:timers/promises';
+import { join } from 'node:path';
 import { CodexConnection } from '../lib/codex.ts';
 import { createNativeAppToolHost, type NativeAppToolsOptions } from '../lib/native-app-tools.ts';
 import { record } from '../src/native/protocol.ts';
@@ -250,4 +251,19 @@ test('native ancestor protection rejects parent messaging while allowing peer an
   const fork = data(await h.call('fork_thread', { threadId: 'target' }));
   assert.equal(typeof fork.threadId, 'string');
   assert.equal(h.fake.calls('thread/fork').length, 1);
+});
+
+test('async session configuration uses the target cwd and cancellation prevents a later resume or turn', async t => {
+  let release!: () => void, entered!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const seen: string[] = [];
+  const h = await fixture(t, { configFor: async (_hostId, cwd) => { seen.push(cwd); entered(); await gate; return {}; } });
+  h.target.cwd = join(h.root, 'target-project');
+  const controller = new AbortController();
+  const pending = h.call('send_message_to_thread', { threadId: 'target', prompt: 'Cancelled while reading policy' }, controller.signal);
+  const rejected = assert.rejects(pending, { name: 'AbortError' });
+  await waiting; controller.abort(); release(); await rejected;
+  assert.deepEqual(seen, [h.target.cwd]);
+  assert.equal(h.fake.calls('thread/resume').length, 0); assert.equal(h.fake.calls('turn/start').length, 0);
 });

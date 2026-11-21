@@ -147,6 +147,7 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
       case 'config/read': return { config: { model: 'fixture-model', model_provider: 'fixture', model_reasoning_effort: 'high',
         approval_policy: 'never', sandbox_mode: 'danger-full-access', service_tier: null }, origins: {}, layers: null };
       case 'mcpServerStatus/list': return { data: [], nextCursor: null };
+      case 'plugin/installed': return { marketplaces: [] };
       case 'app/installed': return { apps: [] };
       case 'collaborationMode/list': return { data: [
         { name: 'Default', mode: 'default', model: null, reasoning_effort: null },
@@ -330,7 +331,9 @@ export async function createFakeCodex(root: string, options: { perMessageDeflate
         if (method === 'thread/resume' && archived.has(thread.id)) {
           invalid('Cannot resume an archived thread');
         }
-        if (method === 'thread/resume') loaded.add(thread.id);
+        if (method === 'thread/resume') {
+          loaded.add(thread.id);
+        }
         return { thread: { ...thread, turns: [] }, readState: receipt(thread.id), ...(method === 'thread/resume' ? settingsFor(thread) : {}) };
       }
       case 'thread/name/set': {

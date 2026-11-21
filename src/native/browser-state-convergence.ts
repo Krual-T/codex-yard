@@ -4,6 +4,7 @@ import type { ObjectValue } from './protocol.ts';
 const attachmentKey = 'pull-request-attachment-records-v3';
 const legacyPrefix = 'codex:persisted-atom:';
 const derivedKeys = new Set([
+  'unread-thread-ids-by-host-v1',
   'config-derived-agent-mode-by-host-id', 'heartbeat-thread-permissions-by-id', 'mcp-global-entrypoints-v2',
   // The pinned snapshot mentions these retired catalogs only in its logout
   // cleanup list. Current discovery rebuilds the live entrypoint projection.

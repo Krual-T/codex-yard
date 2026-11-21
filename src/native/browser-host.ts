@@ -253,19 +253,14 @@ async function send(message: HostMessage) {
   if (message.type === 'log-message') return;
   if (message.type === 'fetch' && message.url?.endsWith('/automation-create') && typeof message.body === 'string') {
     const body = record(JSON.parse(message.body));
-    message = { ...message, body: JSON.stringify({ ...body, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }) };
+    message = { ...message, body: JSON.stringify({ ...body, timeZone: body.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone }) };
   }
   if (files.intercept(message, publish)) return;
   // The Web host does not consume desktop shared objects or runtime config
   // notifications. Avoid serializing the multi-megabyte Statsig snapshot.
   if (message.type === 'shared-object-set' || message.type === 'codex-runtimes-config-changed') return;
   if (message.type === 'persisted-atom-sync-request') {
-    localStorage.removeItem('codex:persisted-atom:unread-thread-ids-by-host-v1');
     const saved = record(JSON.parse(localStorage.getItem('native-atoms') || '{}'));
-    if ('unread-thread-ids-by-host-v1' in saved) {
-      delete saved['unread-thread-ids-by-host-v1'];
-      localStorage.setItem('native-atoms', JSON.stringify(saved));
-    }
     try { saved[sectionAtom] = await sidebarSections.load(); }
     catch (error) { console.warn('旧分组迁移暂未完成，已保留原始记录', error); saved[sectionAtom] = sidebarSections.value(); }
     try { Object.assign(saved, await sidebarOrders.load()); }

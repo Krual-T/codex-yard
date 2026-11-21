@@ -1,0 +1,1 @@
+import{__awaiter as i}from"../../../../../../lib/js/oai_js/node_modules/tslib/tslib.es6.js";import{sky_linux as t}from"./sky_linux.js";function o(o){return function(){return i(this,void 0,void 0,(function*(){yield o.action_settler.wait();const i=yield t("list_apps",{options:o});return JSON.parse(i)}))}}export{o as create_list_apps};

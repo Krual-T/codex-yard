@@ -122,7 +122,7 @@ test('startup sidebar reads current bounded metadata before renderer ready throu
     return (await client.until(message => message.requestId === requestId)).body;
   };
   const first = await read('startup-1');
-  assert.deepEqual(first.threads, [{ id: 'first', title: 'First title', projectId: null }]);
+  assert.deepEqual(first.threads, [{ id: 'first', title: 'First title', projectId: null, recencyAt: 1700000000 }]);
   assert.equal(first.locale, 'zh-CN');
   const request = h.fake.calls('thread/list').at(-1)!;
   assert.equal(request.params.limit, 50);
@@ -630,7 +630,9 @@ for (const [userAgent, version] of [
 
 test('two pages share a daemon thread, keep its configuration, observe events and unsubscribe independently', async t => {
   const h = await fixture(t), a = await h.connect(), b = await h.connect();
-  const { result: { thread } } = await a.rpc(1, 'thread/start', { cwd: h.root });
+  const response = await a.rpc(1, 'thread/start', { cwd: h.root });
+  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  const { result: { thread } } = response;
   const resumed = await b.rpc(1, 'thread/resume', { threadId: thread.id, excludeTurns: true });
   assert.equal(resumed.result.thread.id, thread.id);
   assert.equal(h.fake.calls('thread/start').length, 1);
@@ -718,6 +720,7 @@ test('multiple pages and replayed legacy title requests share one write', async 
 
 test('native side-chat forks retain the official temporary contract and accept their context boundary', async t => {
   const h = await fixture(t), client = await h.connect();
+  for (const id of ['parent', 'ordinary', 'saved']) h.fake.threads.set(id, fixtureThread(id, h.root));
   h.fake.handlers.set('thread/fork', params => ({ thread: fixtureThread('side-chat', h.root, { ephemeral: params.ephemeral === true }) }));
   h.fake.handlers.set('thread/inject_items', () => ({}));
   const instructions = 'You are in a side conversation, not the main thread.\nParent messages are reference context.';
@@ -1734,4 +1737,38 @@ test('projectless chats receive separate existing output directories and setting
   assert.equal(a.cwd, a.outputDirectory);
   await host('write', 'set-global-state', { key: 'queued-follow-ups', value: { test: [] } });
   assert.deepEqual((await host('read', 'get-global-state', { key: 'queued-follow-ups' })).body.value, { test: [] });
+});
+
+test('new, forked and cold-resumed Yard threads read the target cwd policy; loaded threads keep their kernel', async t => {
+  const h = await fixture(t), client = await h.connect();
+  const first = join(h.root, 'first'), second = join(h.root, 'second');
+  h.fake.handlers.set('config/read', params => ({ config: { features: { plugins: false }, mcp_servers: { node_repl: {
+    command: '/App/old-node', url: 'http://obsolete.invalid', enabled: params.cwd !== first, required: true,
+    tool_timeout_sec: params.cwd === first ? 80 : 160, tools: { js: { approval_mode: 'prompt' } },
+  } } } }));
+  const a = await client.rpc(101, 'thread/start', { cwd: first });
+  assert.equal(a.error, undefined, JSON.stringify(a.error));
+  const policy = record(h.fake.calls('thread/start').at(-1)!.params.config)['mcp_servers.node_repl'] as Record<string, unknown>;
+  assert.equal(record(policy.env).CODEX_HOME, join(h.root, 'codex'), 'auxiliary tools share Yard\'s selected backend home');
+  assert.equal(policy.enabled, false); assert.equal(policy.required, true); assert.equal(policy.url, undefined);
+  assert.equal(policy.tool_timeout_sec, 80); assert.deepEqual(policy.tools, { js: { approval_mode: 'prompt' } });
+  await client.rpc(102, 'thread/start', { cwd: second, config: { 'mcp_servers.node_repl.tool_timeout_sec': 240 } });
+  const other = record(record(h.fake.calls('thread/start').at(-1)!.params.config)['mcp_servers.node_repl']);
+  assert.equal(other.enabled, true); assert.equal(other.tool_timeout_sec, 240);
+  await client.rpc(103, 'thread/fork', { threadId: a.result.thread.id });
+  assert.equal(h.fake.calls('config/read').at(-1)!.params.cwd, first);
+  h.fake.loaded.delete(a.result.thread.id);
+  const resumed = await client.rpc(104, 'thread/resume', { threadId: a.result.thread.id });
+  assert.equal(resumed.error, undefined, JSON.stringify(resumed.error));
+  assert.equal(h.fake.calls('config/read').at(-1)!.params.cwd, first);
+  const reads = h.fake.calls('config/read').length;
+  await client.rpc(105, 'thread/resume', { threadId: a.result.thread.id });
+  assert.equal(h.fake.calls('config/read').length, reads);
+  assert.equal(h.fake.calls('thread/resume').at(-1)!.params.config, undefined);
+  assert.equal(h.fake.calls('mcpServer/tool/call').length, 0, 'Resuming must not execute a probe that changes kernel authority or bindings');
+  assert.equal(h.fake.calls('config/batchWrite').length, 0);
+  h.fake.handlers.set('config/read', () => { throw new Error('Policy read failed'); });
+  const starts = h.fake.calls('thread/start').length;
+  const failed = await client.rpc(106, 'thread/start', { cwd: first });
+  assert.match(failed.error.message, /Policy read failed/); assert.equal(h.fake.calls('thread/start').length, starts);
 });

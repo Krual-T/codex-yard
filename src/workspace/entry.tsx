@@ -1,9 +1,10 @@
 import { Archive, ArrowLeft, ArrowRight, AtSign, CalendarClock, ChevronDown, PanelLeft, Pin, PinOff, SquarePen, SquareTerminal } from 'lucide-react';
-import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
-import { parseWorkspaceThreadRoute, sourceWorkspaceRoute, usesPinnedToolRenderer, workspaceThreadRoute } from '../native/history-startup.ts';
-import type { StartupHost, StartupProject, StartupProjectSelection, StartupSidebar, StartupThread } from '../native/startup-sidebar.ts';
-import { activeTurnBeforeArchive, archiveThread, browserAtoms, forkConversation, initialHistory, interruptTurn, olderSidebar, onSidebarChanged, onThreadName, projectSections, remoteHosts, renameThread, selectLocalProject, sendExistingThread, sendNewThread, setThreadPinned, sidebar, sidechats, updateSidebarProject, WorkspaceRequestError, type SidebarChange } from './host.ts';
+import { isWorkspacePageRoute, parseWorkspaceThreadRoute, sourceWorkspaceRoute, usesPinnedToolRenderer, workspaceThreadRoute } from '../native/history-startup.ts';
+import { compareStartupThreads, reconcileSidebarThread, sidebarActivity, visibleSidebarThreads, type StartupHost, type StartupProject, type StartupProjectSelection, type StartupSidebar, type StartupThread } from '../native/startup-sidebar.ts';
+import { installMobileInput } from '../native/mobile-input.ts';
+import { activeTurnBeforeArchive, archiveThread, browserAtoms, forkConversation, initialHistory, interruptTurn, olderSidebar, onSidebarChanged, onThreadName, projectSections, readSidebarThread, remoteHosts, renameThread, selectLocalProject, sendExistingThread, sendHostMessage, sendNewThread, setThreadPinned, sidebar, sidechats, updateSidebarProject, WorkspaceRequestError, type SidebarChange } from './host.ts';
 import { Composer, type ComposerHandle } from './composer.tsx';
 import { AsyncQuestionsProvider } from './async-questions.tsx';
 import { HomePendingMessages, Transcript, useConversation } from './conversation.tsx';
@@ -18,7 +19,8 @@ import { copyChat } from './thread-copy.ts';
 import { isInputRequest, useTurnRequests } from './turn-requests.tsx';
 import { TerminalPanel, type WorkspaceTerminalSession } from './terminal-panel.tsx';
 import { HomeTerminal } from './home-terminal.tsx';
-import { SidebarProfile, workspacePlugins } from './sidebar-profile.tsx';
+import { SidebarProfile } from './sidebar-profile.tsx';
+import { startWorkspacePreferences } from './preferences.ts';
 import { SidebarProduct } from './sidebar-product.tsx';
 import { SidebarProjectRow } from './sidebar-project.tsx';
 import { WorkspaceSearch, type WorkspaceCommand } from './workspace-search.tsx';
@@ -27,6 +29,11 @@ import { WorkspaceOutputLinks } from './message-markdown.tsx';
 import { SidebarSplitter } from './sidebar-splitter.tsx';
 import './workspace.css';
 import './activity-style.css';
+
+installMobileInput();
+const ScheduledPage = lazy(() => import('./scheduled.tsx'));
+const SettingsPage = lazy(() => import('./settings.tsx'));
+const PluginsPage = lazy(() => import('./plugins.tsx'));
 
 function currentRoute() {
   return sourceWorkspaceRoute(location);
@@ -54,6 +61,10 @@ function openRoute(route: string): ConversationView | undefined {
   return { stream: new TurnStream(threadId, hostId), pending };
 }
 const initialView = openRoute(initialRoute);
+function routedView(previous: ConversationView | undefined, route: string) {
+  const target = parseWorkspaceThreadRoute(route);
+  return target && previous?.stream.threadId === target.threadId && previous.stream.hostId === target.hostId ? previous : openRoute(route);
+}
 const projectPreviewRows = 5;
 const recentPageRows = 20;
 recent.catch(() => {});
@@ -65,18 +76,23 @@ function recentThread(snapshot: StartupSidebar | undefined, thread: StartupThrea
 
 function mergeRows(leading: StartupThread[], trailing: StartupThread[]) {
   const ids = new Set(leading.map(thread => thread.id));
-  return [...leading, ...trailing.filter(thread => !ids.has(thread.id))];
+  return [...leading, ...trailing.filter(thread => !ids.has(thread.id))].sort(compareStartupThreads);
 }
 
 type RemoteSidebar = { data?: StartupSidebar; pending?: boolean; error?: string };
 type ArchiveTarget = { id: string; hostId: string; title: string };
 type ThreadTarget = ArchiveTarget & { pinned: boolean; key: string };
 
-function Sidebar({ data, remotes, active, selectedProjectId, select, newChat, updateProject, connect, rename, pin, archive, projectArchived, loadOlder, commands }: {
+function SidebarActivity({ text }: { text: string }) {
+  return text ? <span className="yard-source-sidebar-activity" title={'Loaded chats: ' + text} aria-hidden="true">{text}</span> : null;
+}
+
+function Sidebar({ data, remotes, active, selectedProjectId, syncError, select, newChat, updateProject, connect, rename, pin, archive, projectArchived, loadOlder, commands }: {
   data: StartupSidebar | undefined;
   remotes: Array<StartupHost & RemoteSidebar>;
   active?: string;
   selectedProjectId?: string;
+  syncError?: string;
   select(route: string): void;
   newChat(projectId?: string): void;
   updateProject(hostId: string, projectId: string, action: Parameters<typeof updateSidebarProject>[2]): Promise<void>;
@@ -164,8 +180,8 @@ function Sidebar({ data, remotes, active, selectedProjectId, select, newChat, up
     const selected = route === active && section === selectedSection;
     const key = section + ':' + route;
     const target = { id: thread.id, hostId, pinned: section === 'pinned', key, title: thread.title };
-    const needsApproval = turnRequests.some(request => !isInputRequest(request) && request.hostId === hostId && request.threadId === thread.id);
-    const needsInput = !needsApproval && turnRequests.some(request => isInputRequest(request) && request.hostId === hostId && request.threadId === thread.id);
+    const needsApproval = thread.attention === 'approval' || turnRequests.some(request => !isInputRequest(request) && request.hostId === hostId && request.threadId === thread.id);
+    const needsInput = !needsApproval && (thread.attention === 'input' || turnRequests.some(request => isInputRequest(request) && request.hostId === hostId && request.threadId === thread.id));
     const isRunning = thread.active;
     return <div key={thread.id} className="yard-source-thread-group" data-in-project={section === 'project' || undefined}>
       {editing === key ? <ThreadNameEditor name={thread.title} rename={name => rename(thread.id, name, hostId)}
@@ -189,10 +205,11 @@ function Sidebar({ data, remotes, active, selectedProjectId, select, newChat, up
       }}>
         <span dir="auto">{thread.title}</span>
         {needsApproval && <span className="yard-source-approval-badge">Awaiting approval</span>}
-        {needsInput && section !== 'project' && <span className="yard-source-approval-badge" data-needs-input="">Needs input</span>}
-        {isRunning && !needsInput && <span className="yard-source-pinned-spinner text-text/70" role="status" aria-label="Working">
+        {needsInput && <span className="yard-source-approval-badge" data-needs-input="">Needs input</span>}
+        {isRunning && <span className="yard-source-pinned-spinner text-text/70" role="status" aria-label="Working">
           <WorkspaceIcon name="runningSpinner" className="motion-safe:animate-spin" />
         </span>}
+        {!isRunning && thread.unread && <span className="yard-source-unread" aria-label="Unread" />}
       </button>
       <div className="yard-source-thread-quick" data-menu-open={menu?.key === key || undefined}>
         <button type="button" title={target.pinned ? 'Unpin chat' : 'Pin chat'} aria-label={target.pinned ? 'Unpin chat' : 'Pin chat'}
@@ -207,6 +224,7 @@ function Sidebar({ data, remotes, active, selectedProjectId, select, newChat, up
   }
   function sections(data: StartupSidebar, hostId: string) {
     const matching = data.threads;
+    const pendingIds = new Set(turnRequests.filter(request => request.hostId === hostId).map(request => request.threadId));
     const pinnedIds = new Set(data.pinnedIds);
     const pinned = data.pinnedIds.flatMap(id => matching.find(thread => thread.id === id) ?? []);
     const unpinned = matching.filter(thread => !pinnedIds.has(thread.id));
@@ -219,7 +237,13 @@ function Sidebar({ data, remotes, active, selectedProjectId, select, newChat, up
       if (items) items.push(thread);
       else projectThreads.set(thread.projectId, [thread]);
     }
-    const projectRow = selected?.projectId && projectThreads.get(selected.projectId)?.indexOf(selected);
+    for (const project of data.projects) {
+      const positions = new Map(project.threadOrder?.map((id, index) => [id, index]));
+      if (positions.size) projectThreads.get(project.id)?.sort((a, b) =>
+        (positions.get(a.id) ?? Infinity) - (positions.get(b.id) ?? Infinity) || compareStartupThreads(a, b));
+    }
+    const projectViews = new Map(data.projects.map(project => [project.id, visibleSidebarThreads(projectThreads.get(project.id) ?? [],
+      projectLimits.get(projectKey(project.id)) ?? projectPreviewRows, selected?.id, pendingIds)]));
     const projects = [...data.projects].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned));
     const custom = customSections.flatMap(section => {
       const members = section.projectIds.flatMap(id => projects.find(project => project.id === id) ?? []);
@@ -233,27 +257,28 @@ function Sidebar({ data, remotes, active, selectedProjectId, select, newChat, up
     const projectsGroup = 'projects:' + hostId;
     const showingRecents = !closed.has(recentsGroup);
     const showingProjects = !closed.has(projectsGroup);
+    const recentView = visibleSidebarThreads(recents, recentLimit, selected?.id, pendingIds);
     const sectionGroup = (id: string) => 'custom:' + hostId + ':' + id;
     const selectedGroup = selected?.projectId ? placed.get(selected.projectId) : undefined;
     const selectedSection = selected && pinnedIds.has(selected.id) ? 'pinned'
       : (selectedGroup ? !closed.has(sectionGroup(selectedGroup)) : showingProjects) && selected?.projectId &&
-        typeof projectRow === 'number' && projectRow >= 0 && !closed.has(projectKey(selected.projectId)) &&
-        projectRow < (projectLimits.get(projectKey(selected.projectId)) ?? projectPreviewRows) &&
+        !closed.has(projectKey(selected.projectId)) && projectViews.get(selected.projectId)?.rows.some(row => row.id === selected.id) &&
         data.projects.some(project => project.id === selected.projectId) ? 'project' : 'recent';
     function projectNode(project: StartupProject) {
       const key = projectKey(project.id);
-      const threads = projectThreads.get(project.id) ?? [];
-      const limit = projectLimits.get(key) ?? projectPreviewRows;
+      const view = projectViews.get(project.id)!;
+      const activity = sidebarActivity(matching.filter(thread => thread.projectId === project.id), pendingIds);
       return <div key={project.id}>
         <SidebarProjectRow project={project} hostId={hostId} expanded={!closed.has(key)}
+          activity={closed.has(key) ? activity : undefined}
           selected={hostId === 'local' && selectedProjectId === project.id} toggle={() => toggleGroup(key)}
           start={hostId === 'local' ? () => newChat(project.id) : undefined} update={action => updateProject(hostId, project.id, action)}
           sections={customSections} setSections={setCustomSections} onArchived={(ids, failed) => projectArchived(hostId, ids, failed)} />
         {!closed.has(key) && <>
-          {threads.slice(0, limit).map(thread => row(thread, hostId, 'project', selectedSection))}
-          {threads.length > limit && <button type="button" className="yard-source-project-more"
+          {view.rows.map(thread => row(thread, hostId, 'project', selectedSection))}
+          {view.hidden > 0 && <button type="button" className="yard-source-project-more"
             onClick={() => setProjectLimits(previous => new Map(previous).set(key, (previous.get(key) ?? projectPreviewRows) + 10))}>
-            Show more
+            Show more ({view.hidden})
           </button>}
         </>}
       </div>;
@@ -263,25 +288,31 @@ function Sidebar({ data, remotes, active, selectedProjectId, select, newChat, up
       {custom.map(section => {
         const id = sectionGroup(section.id), open = !closed.has(id);
         return <section key={id} data-app-action-sidebar-section-heading={section.name}><h2>
-          <button type="button" className="yard-source-projects-toggle" aria-expanded={open} aria-controls={id}
-            onClick={() => toggleGroup(id)}>{section.name}<ChevronDown aria-hidden="true" size={13} /></button>
+          <button type="button" className="yard-source-projects-toggle" aria-label={section.name} aria-expanded={open} aria-controls={id}
+            aria-description={!open ? 'Loaded chats: ' + sidebarActivity(matching.filter(thread => section.members.some(project => project.id === thread.projectId)), pendingIds) : undefined}
+            onClick={() => toggleGroup(id)}>{section.name}<ChevronDown aria-hidden="true" size={13} />
+            {!open && <SidebarActivity text={sidebarActivity(matching.filter(thread => section.members.some(project => project.id === thread.projectId)), pendingIds)} />}</button>
         </h2><div id={id} hidden={!open}>{open && section.members.map(projectNode)}</div></section>;
       })}
       <section data-app-action-sidebar-section-heading="Projects"><h2>
-        {projects.length > placed.size ? <button type="button" className="yard-source-projects-toggle" aria-expanded={showingProjects} aria-controls={projectsGroup}
-          onClick={() => toggleGroup(projectsGroup)}>Projects<ChevronDown aria-hidden="true" size={13} /></button> : 'Projects'}</h2>
+        {projects.length > placed.size ? <button type="button" className="yard-source-projects-toggle" aria-label="Projects" aria-expanded={showingProjects} aria-controls={projectsGroup}
+          aria-description={!showingProjects ? 'Loaded chats: ' + sidebarActivity(matching.filter(thread => thread.projectId && !placed.has(thread.projectId)), pendingIds) : undefined}
+          onClick={() => toggleGroup(projectsGroup)}>Projects<ChevronDown aria-hidden="true" size={13} />
+          {!showingProjects && <SidebarActivity text={sidebarActivity(matching.filter(thread => thread.projectId && !placed.has(thread.projectId)), pendingIds)} />}</button> : 'Projects'}</h2>
         {projects.length === placed.size ? <p className="yard-source-sidebar-empty">No projects</p>
           : <div hidden={!showingProjects} id={projectsGroup}>{showingProjects && projects.filter(project => !placed.has(project.id)).map(projectNode)}</div>}
       </section>
       <section data-app-action-sidebar-section-heading="Recents">
-        <h2><button type="button" aria-expanded={showingRecents} aria-controls={recentsGroup} onClick={() => toggleGroup(recentsGroup)}>
+        <h2><button type="button" className="yard-source-projects-toggle" aria-label="Recents" aria-expanded={showingRecents} aria-controls={recentsGroup}
+          aria-description={!showingRecents ? 'Loaded chats: ' + sidebarActivity(recents, pendingIds) : undefined} onClick={() => toggleGroup(recentsGroup)}>
           Recents
+          {!showingRecents && <SidebarActivity text={sidebarActivity(recents, pendingIds)} />}
         </button></h2>
         <div id={recentsGroup} hidden={!showingRecents}>
         {showingRecents && <>
-        {recents.slice(0, recentLimit).map(thread => row(thread, hostId, 'recent', selectedSection))}
+        {recentView.rows.map(thread => row(thread, hostId, 'recent', selectedSection))}
         {!recents.length && data.nextCursor == null && <p className="yard-source-sidebar-empty">No chats</p>}
-        {(recents.length > recentLimit || data.nextCursor != null) && <button type="button" data-source-recent-more=""
+        {(recentView.hidden > 0 || data.nextCursor != null) && <button type="button" data-source-recent-more=""
           data-retry={pageError ? 'true' : undefined}
           className={pageError || !recents.length ? 'yard-source-project-more' : 'yard-source-recent-more'}
           onClick={() => void showMore(hostId, recentLimit, recents.length, data.nextCursor)}>
@@ -295,7 +326,7 @@ function Sidebar({ data, remotes, active, selectedProjectId, select, newChat, up
   }
   return <div id="app-shell-sidebar" className="select-none relative box-border flex h-full w-full isolate flex-col">
     <div className="yard-source-brand">
-      <SidebarProduct returnRoute={active} />
+      <SidebarProduct navigate={select} />
       <button type="button" className="yard-source-search" title="Search" aria-label="Search" aria-haspopup="dialog"
         aria-expanded={searchOpen} aria-keyshortcuts="Control+K Meta+K" onClick={() => setSearchOpen(true)}><WorkspaceIcon name="search" /></button>
     </div>
@@ -305,9 +336,17 @@ function Sidebar({ data, remotes, active, selectedProjectId, select, newChat, up
     <nav className="yard-source-nav" data-app-action-sidebar-scroll=""
       onScroll={event => revealNearEnd(event.currentTarget)}
       onWheel={event => { if (event.deltaY > 0) revealNearEnd(event.currentTarget); }}>
-      <a href={workspacePlugins} className="yard-source-action sidebar-item hover:bg-primary-ghost-hover">
+      <a href="/?initialRoute=/automations" aria-current={active === '/automations' ? 'page' : undefined}
+        onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); select('/automations'); } }}
+        className="yard-source-action sidebar-item hover:bg-primary-ghost-hover">
+        <CalendarClock size={16} aria-hidden="true" />Scheduled
+      </a>
+      <a href="/?initialRoute=/plugins" aria-current={active?.startsWith('/plugins') ? 'page' : undefined}
+        onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); select('/plugins'); } }}
+        className="yard-source-action sidebar-item hover:bg-primary-ghost-hover">
         <AtSign size={16} aria-hidden="true" />Plugins
       </a>
+      {syncError && <p role="status" className="yard-source-sidebar-error">{syncError}</p>}
       {data && sections(data, 'local')}
       {remotes.map(remote => <div key={remote.hostId} className="yard-source-remote" data-source-sidebar-host={remote.hostId}>
         <h2>{remote.displayName}</h2>
@@ -319,7 +358,7 @@ function Sidebar({ data, remotes, active, selectedProjectId, select, newChat, up
         {remote.error && <p className="yard-source-sidebar-error" role="alert">{remote.error}</p>}
       </div>)}
     </nav>
-    <SidebarProfile returnRoute={active} />
+    <SidebarProfile navigate={select} />
     {menu && <SidebarThreadMenu key={menu.key} x={menu.x} y={menu.y} trigger={menu.trigger} pinned={menu.pinned}
       choose={action => void act(action, menu, menu.trigger)} close={closeMenu} />}
     {searchOpen && <WorkspaceSearch sources={[{ hostId: 'local', data }, ...remotes.flatMap(remote =>
@@ -330,6 +369,9 @@ function Sidebar({ data, remotes, active, selectedProjectId, select, newChat, up
 }
 
 function App() {
+  const [pageRoute, setPageRoute] = useState(initialRoute);
+  const toolPage = isWorkspacePageRoute(pageRoute);
+  const [chatMounted, setChatMounted] = useState(!isWorkspacePageRoute(initialRoute));
   const [view, setView] = useState(initialView);
   const stream = view?.stream;
   const id = stream?.threadId;
@@ -342,6 +384,7 @@ function App() {
   const [snapshots, setSnapshots] = useState(() => new Map<string, RemoteSidebar>());
   const [names, setNames] = useState(() => new Map<string, string>());
   const [fault, setFault] = useState<string>();
+  const [sidebarError, setSidebarError] = useState<string>();
   const projectMenu = useId();
   const [projectOverride, setProject] = useState<StartupProjectSelection | null>();
   const projectSelection = projectOverride === undefined ? data?.selectedProject : projectOverride;
@@ -365,6 +408,7 @@ function App() {
   const [confirmation, setConfirmation] = useState<{ target: ArchiveTarget; turnId: string; trigger: HTMLElement }>();
   const unlistedThreads = useRef(new Map<string, StartupThread>());
   const sidebarRevisions = useRef(new Map<string, number>());
+  const sidebarChangedThreads = useRef(new Map<string, Set<string>>());
   const sidebarCursors = useRef(new Map<string, Set<string>>());
   const sidebarSizes = useRef(new Map<string, number>());
   const loadedSidebarHosts = useRef(new Set(['local']));
@@ -375,10 +419,14 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(() => !matchMedia('(max-width: 767px)').matches);
   const toggleSidebar = () => setSidebarOpen(value => !value);
   useEffect(() => {
+    const revision = sidebarRevisions.current.get('local') ?? 0;
     recent.then(data => {
+      if ((sidebarRevisions.current.get('local') ?? 0) !== revision) return;
       for (const thread of unlistedThreads.current.values()) data = recentThread(data, thread);
-      setData(previous => previous ?? data);
-    }, error => setFault(String(error)));
+      setData(previous => (sidebarRevisions.current.get('local') ?? 0) === revision ? previous ?? data : previous);
+    }, error => {
+      if ((sidebarRevisions.current.get('local') ?? 0) === revision) setFault(String(error));
+    });
   }, []);
   const rememberName = useCallback((id: string, name: string, hostId: string) => {
     const key = workspaceThreadRoute(hostId, id);
@@ -388,7 +436,9 @@ function App() {
   useEffect(() => {
     const update = () => {
       if (usesPinnedToolRenderer(currentRoute())) { location.replace(location.href); return; }
-      generation.current++; setFault(undefined); setView(openRoute(currentRoute()));
+      const to = currentRoute();
+      generation.current++; setFault(undefined); setPageRoute(to);
+      if (!isWorkspacePageRoute(to)) { setChatMounted(true); setView(previous => routedView(previous, to)); }
     };
     window.addEventListener('popstate', update);
     return () => window.removeEventListener('popstate', update);
@@ -401,6 +451,7 @@ function App() {
     if (hostId !== 'local') setSnapshots(previous => previous.get(hostId)?.data ? previous
       : new Map(previous).set(hostId, { pending: true }));
     try {
+      const changed = sidebarChangedThreads.current.get(hostId);
       let next = await sidebar(hostId);
       if (revisions.get(hostId) !== revision) return;
       // Re-read the already visible pages so external archives disappear and
@@ -415,9 +466,39 @@ function App() {
         if (revisions.get(hostId) !== revision) return;
         next = { ...next, threads: mergeRows(next.threads, page.threads), nextCursor: page.nextCursor };
       }
+      if (hostId === 'local') {
+        // Retain confirmed thread identities until the DB-only lister sees them.
+        for (const thread of next.threads) unlistedThreads.current.delete(thread.id);
+        for (const thread of unlistedThreads.current.values()) next = recentThread(next, thread);
+      }
+      const listedIds = new Set(next.threads.map(thread => thread.id));
+      // Confirm only ordinary loaded rows. Hidden or off-page conversations
+      // cannot block this sidebar refresh or enter through a metadata read.
+      const confirmations = await Promise.all([...(changed ?? [])].filter(id => listedIds.has(id)).map(async id => {
+        try { return { id, result: await readSidebarThread(id, hostId) }; }
+        catch { return { id, result: undefined }; }
+      }));
+      if (revisions.get(hostId) !== revision) return;
       sidebarCursors.current.set(hostId, cursors);
       loadedSidebarHosts.current.add(hostId);
+      const confirmed = new Map(confirmations.map(value => [value.id, value.result]));
+      const failed = new Set(confirmations.filter(value => !value.result).map(value => value.id));
+      const syncError = failed.size ? 'Some chat statuses could not be refreshed. Retrying…' : undefined;
+      for (const { id, result } of confirmations) if (result) changed?.delete(id);
+      for (const id of changed ?? []) if (!listedIds.has(id)) changed?.delete(id);
+      const apply = (previous?: StartupSidebar) => {
+        if (revisions.get(hostId) !== revision) return previous;
+        const previousRows = new Map(previous?.threads.map(row => [row.id, row]));
+        return { ...next, threads: next.threads.map(row => {
+          const result = confirmed.get(row.id);
+          if (result) return reconcileSidebarThread(row, result);
+          // Keep the last confirmed row while its metadata read is unavailable.
+          // It can leave only through the ordinary list or an archive event.
+          return failed.has(row.id) ? previousRows.get(row.id) ?? row : row;
+        }).sort(compareStartupThreads) };
+      };
       setNames(previous => {
+        if (revisions.get(hostId) !== revision) return previous;
         const names = new Map(previous);
         for (const thread of next.threads) {
           const key = workspaceThreadRoute(hostId, thread.id);
@@ -426,16 +507,16 @@ function App() {
         return names.size === previous.size ? previous : names;
       });
       if (hostId !== 'local') {
-        setSnapshots(previous => new Map(previous).set(hostId, { data: next }));
+        setSnapshots(previous => revisions.get(hostId) !== revision ? previous
+          : new Map(previous).set(hostId, { data: apply(previous.get(hostId)?.data), error: syncError }));
         return;
       }
-      // Retain confirmed thread identities until the DB-only lister sees them.
-      for (const thread of next.threads) unlistedThreads.current.delete(thread.id);
-      for (const thread of unlistedThreads.current.values()) next = recentThread(next, thread);
-      setData(next);
+      setData(apply);
+      setSidebarError(syncError);
     } catch (error) {
       if (revisions.get(hostId) !== revision) return;
-      if (hostId !== 'local') setSnapshots(previous => new Map(previous).set(hostId, { data: previous.get(hostId)?.data,
+      if (hostId === 'local') setSidebarError('Chats may be out of date. Retrying…');
+      else setSnapshots(previous => revisions.get(hostId) !== revision ? previous : new Map(previous).set(hostId, { data: previous.get(hostId)?.data,
         error: error instanceof Error ? error.message : String(error) }));
       throw error;
     }
@@ -458,14 +539,27 @@ function App() {
         });
       }
     }
-    const refresh = ({ hostId, threadId, removed, active }: SidebarChange = {}) => {
+    const refresh = ({ hostId, threadId, removed, active, reconcile, disconnected }: SidebarChange = {}) => {
       if (disposed) return;
       if (hostId && !loadedSidebarHosts.current.has(hostId)) return;
-      if (hostId && threadId && (removed || active !== undefined)) {
-        sidebarRevisions.current.set(hostId, (sidebarRevisions.current.get(hostId) ?? 0) + 1);
+      const hosts = hostId ? [hostId] : [...loadedSidebarHosts.current];
+      // Every observed change invalidates older list and metadata responses,
+      // including read receipts and requests for input or approval.
+      for (const id of hosts) sidebarRevisions.current.set(id, (sidebarRevisions.current.get(id) ?? 0) + 1);
+      if (hostId && threadId) {
+        let changed = sidebarChangedThreads.current.get(hostId);
+        if (removed) changed?.delete(threadId);
+        else if (reconcile) {
+          if (!changed) { changed = new Set(); sidebarChangedThreads.current.set(hostId, changed); }
+          changed.add(threadId);
+        }
+      }
+      // Completion keeps the row until its activity and receipt are confirmed
+      // together. An active=false event alone must not hide the conversation.
+      if (hostId && threadId && (removed || active === true)) {
         const update = (previous?: StartupSidebar) => previous && {
           ...previous, threads: removed ? previous.threads.filter(thread => thread.id !== threadId)
-            : previous.threads.map(thread => thread.id === threadId ? { ...thread, active: active ? true as const : undefined } : thread),
+            : previous.threads.map(thread => thread.id === threadId ? { ...thread, active: true as const } : thread),
         };
         if (hostId === 'local') { if (removed) unlistedThreads.current.delete(threadId); setData(update); }
         else setSnapshots(previous => {
@@ -473,7 +567,13 @@ function App() {
           return new Map(previous).set(hostId, { ...snapshot, data: update(snapshot?.data) });
         });
       }
-      for (const id of hostId ? [hostId] : loadedSidebarHosts.current) pending.add(id);
+      if (disconnected) {
+        if (hosts.includes('local')) setSidebarError('Connection lost. Chat statuses may be out of date.');
+        setSnapshots(previous => new Map([...previous].map(([id, snapshot]) => hosts.includes(id)
+          ? [id, { ...snapshot, error: 'Connection lost. Chat statuses may be out of date.' }] : [id, snapshot])));
+        return;
+      }
+      for (const id of hosts) pending.add(id);
       schedule();
     };
     const foreground = () => { if (!document.hidden) refresh(); };
@@ -495,7 +595,7 @@ function App() {
     cursors.add(cursor);
     sidebarCursors.current.set(hostId, cursors);
     const nextCursor = page.nextCursor != null && !cursors.has(page.nextCursor) ? page.nextCursor : null;
-    const append = (previous?: StartupSidebar) => previous?.nextCursor === cursor
+    const append = (previous?: StartupSidebar) => sidebarRevisions.current.get(hostId) === revision && previous?.nextCursor === cursor
       ? { ...previous, threads: mergeRows(previous.threads, page.threads), nextCursor } : previous;
     if (hostId === 'local') setData(append);
     else setSnapshots(previous => {
@@ -549,17 +649,24 @@ function App() {
     }
     generation.current++;
     window.history.pushState(null, '', url);
-    setFault(undefined); setView(prepared ?? openRoute(to));
+    if (matchMedia('(max-width: 767px)').matches) setSidebarOpen(false);
+    setPageRoute(to); setFault(undefined);
+    if (!isWorkspacePageRoute(to)) { setChatMounted(true); setView(previous => prepared ?? routedView(previous, to)); }
   }, []);
   useEffect(() => {
     const receive = (event: MessageEvent) => {
       if (event.source !== window || event.origin !== location.origin || event.data?.type !== 'navigate-to-route' ||
           typeof event.data.path !== 'string') return;
-      if (event.data.path === '/' || usesPinnedToolRenderer(event.data.path) || parseWorkspaceThreadRoute(event.data.path)) navigate(event.data.path);
+      if (event.data.path === '/' || isWorkspacePageRoute(event.data.path) || usesPinnedToolRenderer(event.data.path) || parseWorkspaceThreadRoute(event.data.path)) navigate(event.data.path);
     };
     window.addEventListener('message', receive);
     return () => window.removeEventListener('message', receive);
   }, [navigate]);
+  // Register after the route listener, so a notification received during startup
+  // can be delivered without reloading the page or losing its draft.
+  useEffect(() => {
+    void sendHostMessage({ type: 'browser-sidebar-owner-sync', ownerRoutePath: pageRoute }).catch(console.error);
+  }, [pageRoute]);
   const branch = useCallback(async (turnId?: string) => {
     if (!stream || branching.current) return;
     const selected = generation.current;
@@ -569,6 +676,7 @@ function App() {
       const thread = await forkConversation(stream.threadId, turnId, stream.hostId);
       if (stream.hostId === 'local') {
         const item: StartupThread = { id: thread.id, projectId: thread.projectId ?? null,
+          recencyAt: thread.recencyAt ?? thread.updatedAt ?? thread.createdAt,
           title: (thread.name?.trim() || thread.preview?.trim().split('\n')[0] || 'New chat').slice(0, 240) };
         unlistedThreads.current.set(thread.id, item);
         setData(data => recentThread(data, item));
@@ -667,17 +775,15 @@ function App() {
       ...(forwardEnabled ? [{ key: 'forward', label: 'Forward', group: 'Navigation', icon: <ArrowRight size={14} />, run: () => window.history.forward() }] : []),
       { key: 'sidebar', label: 'Toggle sidebar', group: 'Panels', icon: <PanelLeft size={14} />, run: toggleSidebar },
       ...(terminalAvailable ? [{ key: 'terminal', label: 'Open terminal', group: 'Panels', icon: <SquareTerminal size={14} />, run: toggleTerminal }] : []),
-      { key: 'scheduled', label: 'Go to scheduled tasks', group: 'Navigation', icon: <CalendarClock size={14} />, run: () => {
-        const query = new URLSearchParams({ initialRoute: '/automations' });
-        if (route) query.set('workspaceReturn', route);
-        location.assign('/?' + query);
-      } },
-      { key: 'plugins', label: 'Go to skills', group: 'Skills', icon: <AtSign size={14} />, run: () => location.assign(workspacePlugins) },
+      { key: 'scheduled', label: 'Go to scheduled tasks', group: 'Navigation', icon: <CalendarClock size={14} />,
+        run: () => navigate('/automations') },
+      { key: 'plugins', label: 'Go to skills', group: 'Skills', icon: <AtSign size={14} />, run: () => navigate('/skills') },
+      { key: 'settings', label: 'Open settings', group: 'Navigation', run: () => navigate('/settings/general-settings') },
     ];
   }
   return <div className="yard-source-frame relative flex flex-col _Layout_etoz9_2" data-app-shell-frame="true"
     data-app-shell-sidebar-open={sidebarOpen} data-app-shell-responsive-sidebar="true">
-    <header className="yard-source-titlebar" data-app-shell-titlebar="true" data-source-chat={id ? '' : undefined}>
+    <header className="yard-source-titlebar" data-app-shell-titlebar="true" data-source-chat={!toolPage && id ? '' : undefined}>
       <button type="button" title="Back" aria-label="Back" disabled={!backEnabled}
         onClick={() => window.history.back()}><WorkspaceIcon name="back" /></button>
       <button type="button" title="Forward" aria-label="Forward" disabled={!forwardEnabled}
@@ -685,12 +791,12 @@ function App() {
       <button type="button" title={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
         data-app-shell-sidebar-trigger="true" aria-controls="app-shell-sidebar" aria-expanded={sidebarOpen}
         onClick={toggleSidebar}><WorkspaceIcon name={sidebarOpen ? 'sidebar' : 'sidebarClosed'} /></button>
-      {id && title && <ThreadTitle key={route} ref={titleControl} name={title} project={threadProject?.label}
+      {!toolPage && id && title && <ThreadTitle key={route} ref={titleControl} name={title} project={threadProject?.label}
         rename={name => rename(id, name, hostId)} />}
     </header>
     <div className="yard-source-body" data-app-shell-workspace-row="true">
       <aside hidden={!sidebarOpen} className="yard-source-sidebar" aria-label="Sidebar">
-        <Sidebar data={displayNames(data, 'local')} remotes={remotes} active={route} selectedProjectId={id ? undefined : projectId}
+        <Sidebar data={displayNames(data, 'local')} remotes={remotes} active={pageRoute} selectedProjectId={id ? undefined : projectId} syncError={sidebarError}
           newChat={nextProject => {
             navigate('/');
             if (nextProject !== undefined) chooseProject(nextProject);
@@ -704,7 +810,15 @@ function App() {
           pin={pin} archive={requestArchive} projectArchived={archiveRows} connect={connect} select={navigate} loadOlder={loadOlder} commands={commands} />
         <SidebarSplitter />
       </aside>
-      <div className="yard-source-workspace" ref={workspace}>
+      {toolPage && <div className="yard-source-workspace yard-source-tool-workspace"><Suspense fallback={<p role="status">Loading…</p>}>
+        {(() => {
+          const props = { route: pageRoute, navigate, hosts: [{ hostId: 'local', label: 'Local' }, ...hosts.map(host => ({ hostId: host.hostId, label: host.displayName }))],
+            projects: [{ hostId: 'local', data }, ...remotes].flatMap(source =>
+            (source.data?.projects ?? []).map(project => ({ id: project.id, label: project.label, hostId: source.hostId }))) };
+          return pageRoute.startsWith('/settings') ? <SettingsPage {...props} /> : pageRoute.startsWith('/automations') ? <ScheduledPage {...props} /> : <PluginsPage {...props} />;
+        })()}
+      </Suspense></div>}
+      {chatMounted && <div className="yard-source-workspace" ref={workspace} hidden={toolPage} inert={toolPage}>
       <McpAppTabs value={id ? mcpAppTabs : null}>
       {id && title && <HeaderChatActions key={'header:' + route} pinned={threadSidebar?.pinnedIds.includes(id) ?? false}
         pending={!!confirmation} rename={() => titleControl.current?.edit()}
@@ -760,6 +874,7 @@ function App() {
                 }, permissionChoice, attachments, clientUserMessageId);
                 prepared!.acknowledge(turn);
                 const item: StartupThread = { id: thread.id, projectId: thread.projectId ?? projectId ?? null,
+                  active: true, recencyAt: thread.recencyAt ?? thread.updatedAt ?? thread.createdAt,
                   title: thread.name?.trim() || text.trim().split('\n')[0]!.slice(0, 240) || attachments[0]?.name || thread.preview?.trim() || 'New chat' };
                 unlistedThreads.current.set(thread.id, item);
                 setData(data => recentThread(data, item));
@@ -785,7 +900,7 @@ function App() {
         openBottomTerminal={() => { if (!terminalSessions.has(terminalKey)) toggleTerminal(); }}
         createOutput={type => composer.current?.appendOutput(type)} />}
       </McpAppTabs>
-      </div>
+      </div>}
     </div>
     {confirmation && <ArchiveConfirmation title={confirmation.target.title}
       cancel={() => { setConfirmation(undefined); confirmation.trigger.focus({ preventScroll: true }); }}
@@ -793,21 +908,10 @@ function App() {
   </div>;
 }
 
-const theme = matchMedia('(prefers-color-scheme: dark)');
-function syncTheme() {
-  document.documentElement.dataset.theme = theme.matches ? 'dark' : 'light';
-  // Match the pinned theme provider's default accent; the shared stylesheet's
-  // dark fallback (#99ceff) is lighter than the provider's actual #83c3ff.
-  document.documentElement.style.setProperty('--app-color-text-accent', theme.matches ? 'rgb(131 195 255)' : 'rgb(51 156 255)');
-}
 const html = document.documentElement;
 const stored = browserAtoms();
 const width = stored['sidebar-width'];
 if (typeof width === 'number' && Number.isFinite(width)) html.style.setProperty('--yard-source-sidebar-width', Math.max(240, Math.min(520, width)) + 'px');
 Object.assign(html.dataset, { codexWindowType: 'electron', windowType: 'electron', codexOs: 'linux', codexWindowChrome: 'application-menu' });
-html.style.setProperty('--font-ui-size', '14px');
-html.style.setProperty('--text-base', '14px');
-html.style.setProperty('--text-sm', '13px');
-syncTheme();
-theme.addEventListener('change', syncTheme);
+startWorkspacePreferences();
 createRoot(document.getElementById('root')!).render(<App />);

@@ -8,7 +8,7 @@ import type { ModelSelection } from './model-selection.ts';
 interface Options {
   providers: ModelProviders;
   connections(hostId: string): CodexConnection[];
-  sessionConfig(hostId: string, provider: string, connection: CodexConnection): Promise<ObjectValue>;
+  sessionConfig(hostId: string, provider: string, connection: CodexConnection, cwd?: string): Promise<ObjectValue>;
 }
 
 /** Codex 0.164 accepts a provider on start/fork/resume, but not turn/start.
@@ -84,7 +84,9 @@ export class ProviderRouting {
     if (selection && params) {
       if (['thread/start', 'thread/fork', 'thread/resume'].includes(method)) {
         params.modelProvider = selection.provider;
-        params.config = { ...record(params.config), ...await this.options.sessionConfig(hostId, selection.provider, connection) };
+        const cwd = typeof params.cwd === 'string' ? params.cwd : typeof params.threadId === 'string'
+          ? (await connection.request('thread/read', { threadId: params.threadId, includeTurns: false })).thread.cwd : undefined;
+        params.config = { ...await this.options.sessionConfig(hostId, selection.provider, connection, cwd), ...record(params.config) };
       }
       if (typeof params.threadId === 'string' && method !== 'thread/fork') {
         await this.switchProvider(hostId, connection, params.threadId, selection, params);
@@ -134,7 +136,7 @@ export class ProviderRouting {
         if (client === connection || reply.status === 'unsubscribed') restore.push(client);
       }
       const result = record(await connection.request('thread/resume', { ...resume, modelProvider: selection.provider, model: selection.model,
-        serviceTier: null, config: { ...oldConfig, ...await this.options.sessionConfig(hostId, selection.provider, connection),
+        serviceTier: null, config: { ...oldConfig, ...await this.options.sessionConfig(hostId, selection.provider, connection, thread.cwd),
           ...(requested.effort != null ? { model_reasoning_effort: requested.effort } : {}) } }, { mutating: true }));
       if (record(result.thread).modelProvider !== selection.provider) throw new Error('Codex 尚未释放此会话，可能仍被其他客户端使用；请关闭其他客户端中的会话后重试');
       this.threadProviders.set(hostId + ':' + threadId, selection.provider);

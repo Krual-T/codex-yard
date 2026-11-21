@@ -10,6 +10,7 @@ import { createFakeCodex, fixtureThread, fixtureTurn, agentItem, NO_REPLY } from
 const root = await mkdtemp('/tmp/yard-schedule-ui-'), dataDir = join(root, 'data');
 const output = resolve(process.env.AGENTS_AUTOMATIONS_EVIDENCE ?? '.local/automations-ui');
 const sourceWorkspace = process.argv.includes('--source-workspace');
+let documentId: string;
 await mkdir(dataDir); await mkdir(output, { recursive: true });
 if (process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT) await cp(process.env.AGENTS_TEST_CONFIGURATION_SNAPSHOT, join(dataDir, 'configuration-snapshot'), { recursive: true });
 await writeFile(join(dataDir, 'projects.json'), JSON.stringify([{ name: 'Schedule project', path: root }]));
@@ -43,30 +44,52 @@ page.on('websocket', socket => {
 page.on('pageerror', error => errors.push(error.message));
 try {
   if (sourceWorkspace) {
-    const startingConversation = '00000000-0000-4000-8000-000000000001';
+    const startingConversation = process.env.AGENTS_TEST_CODEX_SOCKET
+      ? (await app.control.request<{ thread: { id: string } }>('thread/start', { cwd: root, historyMode: 'paginated' })).thread.id
+      : '00000000-0000-4000-8000-000000000001';
     const initial = app.url + '/local/' + startingConversation;
     const editor = page.locator('[data-codex-composer="true"][contenteditable="true"]').first();
     await page.goto(initial, { waitUntil: 'commit' });
     await editor.fill('Conversation draft while managing schedules');
+    documentId = await page.evaluate(() => { const id = crypto.randomUUID(); Object.assign(window, { scheduleDocumentId: id }); return id; });
+    await page.screenshot({ path: join(output, 'source-sidebar.png') });
+    await page.getByRole('link', { name: 'Scheduled', exact: true }).click();
+    await page.getByRole('button', { name: 'Create', exact: true }).waitFor({ timeout: 45_000 });
+    assert.equal(await page.evaluate(() => (window as unknown as { scheduleDocumentId: string }).scheduleDocumentId), documentId);
+    await page.goBack();
+    assert.equal(await editor.textContent(), 'Conversation draft while managing schedules');
+    report.sidebarScheduled = true;
     await page.getByRole('button', { name: 'Search', exact: true }).click();
     await page.getByRole('combobox').fill('Go to scheduled tasks');
     await page.getByRole('option', { name: 'Go to scheduled tasks' }).click();
-    await page.getByRole('button', { name: 'Create scheduled task options' }).waitFor({ timeout: 45_000 });
+    await page.getByRole('button', { name: 'Create', exact: true }).waitFor({ timeout: 45_000 });
     await page.goBack();
     assert.equal(await editor.textContent(), 'Conversation draft while managing schedules');
     await page.goForward();
+    assert.equal(await page.evaluate(() => (window as unknown as { scheduleDocumentId: string }).scheduleDocumentId), documentId);
     report.draftPreserved = true;
   } else await page.goto(app.url + '/?initialRoute=%2Fautomations', { waitUntil: 'commit' });
   await page.getByRole('button', { name: /^(Create|创建)$/ }).first().waitFor({ timeout: 45000 });
   await writeFile(join(output, 'initial.txt'), await page.locator('body').ariaSnapshot());
-  await page.getByRole('button', { name: 'Create scheduled task options' }).click();
-  await page.getByRole('menuitem', { name: 'Set up manually' }).click();
+  if (sourceWorkspace) await page.getByRole('button', { name: 'Create', exact: true }).click();
+  else {
+    await page.getByRole('button', { name: 'Create scheduled task options' }).click();
+    await page.getByRole('menuitem', { name: 'Set up manually' }).click();
+  }
   await page.getByTestId('automation-title-input').waitFor({ timeout: 10000 });
   await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Independent review fixture');
   await page.getByRole('textbox', { name: 'Prompt', exact: true }).fill('Reply with SCHEDULE_STANDALONE_OK.');
-  await page.getByRole('button', { name: 'Project', exact: true }).click();
-  await page.getByRole('menuitem', { name: 'Schedule project' }).click();
-  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  if (sourceWorkspace) await page.getByRole('combobox', { name: 'Project', exact: true }).selectOption({ label: 'Schedule project' });
+  else {
+    await page.getByRole('button', { name: 'Project', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Schedule project' }).click();
+  const model = page.getByRole('button', { name: 'Model', exact: true });
+  if ((await model.innerText()).includes('Select model')) {
+    await model.click();
+    await page.getByRole('menuitem').first().click();
+  }
+  }
+  await page.getByRole('button', { name: 'Create', exact: true }).last().click();
   await page.getByText('Independent review fixture', { exact: true }).first().waitFor({ timeout: 10000 });
   const saved = await app.automations.fetch('list-automations', {}) as {
     items: { id: string; name: string; target: { type: string; projectId: string }; hostId: string; cwds: string[] }[];
@@ -110,6 +133,11 @@ try {
     await page.getByText('本次未取得会话 ID，请先检查近期会话。', { exact: false }).waitFor();
     await page.screenshot({ path: join(output, 'recovery.png') });
     await page.getByRole('button', { name: '取消', exact: true }).click();
+    if (sourceWorkspace) {
+      await page.getByRole('button', { name: '核查后解除', exact: true }).click();
+      await page.getByRole('button', { name: '已核查，解除阻塞', exact: true }).click();
+      await page.getByText('结果未知，已解除', { exact: false }).waitFor({ timeout: 10000 });
+    } else {
     // Exercise the pinned history component's existing result-card branch in
     // the editor fixture, without enabling unrelated cloud task feature gates.
     const details = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -136,6 +164,7 @@ try {
     await details.getByRole('button', { name: '已核查，解除阻塞', exact: true }).click();
     await page.getByText('结果未知，已解除', { exact: true }).waitFor({ timeout: 10000 });
     await details.close();
+    }
     const released = (await app.automations.fetch('automation-runs', {}) as { items: AutomationRun[] }).items[0];
     assert.equal(released.status, 'released'); report.released = released;
   }
@@ -143,6 +172,12 @@ try {
   await page.waitForURL(url => decodeURIComponent(url.href).includes(run!.threadId!), { timeout: 10000 });
   await page.getByText('SCHEDULE_STANDALONE_OK', { exact: true }).first().waitFor({ timeout: 10000 });
   if (sourceWorkspace) await page.locator('.yard-source-frame').waitFor();
+  if (sourceWorkspace) {
+    assert.equal(await page.evaluate(() => (window as unknown as { scheduleDocumentId: string }).scheduleDocumentId), documentId!);
+    report.noDocumentReload = true;
+    const scripts = await page.evaluate(() => performance.getEntriesByType('resource').map(entry => entry.name));
+    assert.ok(!scripts.some(name => /(?:workbench-pinned-entry|app-initial-|automations-page-).*\.js(?:$|\?)/.test(name)));
+  }
   report.chatUrl = page.url();
   assert.deepEqual(errors, []);
   report.ok = true;

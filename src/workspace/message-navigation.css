@@ -1,0 +1,20 @@
+.yard-source-message-navigation { position:absolute; top:50%; left:12px; z-index:20; transform:translateY(-50%); width:36px; }
+.yard-source-message-navigation-list { width:36px; max-height:min(70vh,640px); overflow:auto; scrollbar-width:none; overscroll-behavior:contain; padding-block:4px; }
+.yard-source-message-navigation-list::-webkit-scrollbar { display:none; }
+.yard-source-message-navigation-group { content-visibility:auto; contain-intrinsic-size:auto 640px; }
+.yard-source-message-navigation button { width:36px; height:10px; display:flex; align-items:center; justify-content:center; padding:0; border:0; background:transparent; cursor:pointer; color:var(--color-text-tertiary); touch-action:pan-y; }
+.yard-source-message-navigation button span { height:2px; border-radius:2px; background:currentColor; opacity:.4; transition:width 160ms cubic-bezier(.2,.8,.2,1),opacity 160ms; }
+.yard-source-message-navigation button[data-active] { color:var(--color-text-primary); }
+.yard-source-message-navigation button[data-active] span { opacity:.6; }
+.yard-source-message-navigation button[data-targeted] { color:var(--color-text-primary); }
+.yard-source-message-navigation button[data-targeted] span { opacity:1; }
+.yard-source-message-navigation button:focus-visible { outline:2px solid var(--color-text-primary); outline-offset:0; border-radius:4px; }
+.yard-source-message-navigation-preview { position:absolute; left:36px; width:min(320px,calc(100vw - 72px)); box-sizing:border-box; border-radius:12px; padding:8px; background:var(--color-surface-elevated-secondary, var(--color-surface)); box-shadow:0 4px 24px #0002; color:var(--color-text-primary); pointer-events:none; font-size:12px; line-height:18px; }
+.yard-source-message-navigation-preview strong { display:block; font-weight:600; white-space:nowrap; text-overflow:ellipsis; overflow:hidden; }
+.yard-source-message-navigation-preview p { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; margin:4px 0 0; white-space:pre-line; color:var(--color-text-secondary); }
+.yard-source-message-navigation-preview small { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--color-text-secondary); }
+.yard-source-message-navigation-status { position:sticky; bottom:8px; width:fit-content; margin-inline:auto; border-radius:8px; padding:6px 10px; background:var(--color-surface); color:var(--color-text-secondary); font-size:12px; z-index:21; }
+.yard-source-message-navigation-status button { text-decoration:underline; }
+[data-message-navigation-flash] [data-user-message-bubble] { animation:yard-message-navigation-flash 1400ms ease-out; }
+@keyframes yard-message-navigation-flash { 0%,30% { box-shadow:0 0 0 4px color-mix(in srgb,var(--color-text-primary) 12%,transparent); } 100% { box-shadow:0 0 0 0 transparent; } }
+@media(prefers-reduced-motion:reduce) { .yard-source-message-navigation button span { transition:none; } [data-message-navigation-flash] [data-user-message-bubble] { animation:none; } }

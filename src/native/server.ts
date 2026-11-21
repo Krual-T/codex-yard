@@ -14,7 +14,10 @@ import { CodexConnection, RpcError } from '../../lib/codex.ts';
 import type { RpcMessage } from '../../lib/codex.ts';
 import { permissionStart, publicPermissions } from '../../lib/permissions.ts';
 import { createAppTools } from '../../lib/app-tools.ts';
-import { computerConfig } from '../../lib/computer.ts';
+import { installedPluginIds, nodeReplConfig, nodeReplOverrides, standalonePluginConfig } from '../../lib/standalone-tools.ts';
+import { startIabHost } from '../../lib/browser-iab.ts';
+import { startWindowsChromeBridge } from '../../lib/browser-windows-pipe.ts';
+import type { IabPanelRequest } from '../browser-reuse/iab-protocol.ts';
 import { createHostToolHandler } from '../../lib/host-tools.ts';
 import { createNativeAppToolHost } from '../../lib/native-app-tools.ts';
 import type { NativeProject } from '../../lib/native-app-tools.ts';
@@ -141,7 +144,6 @@ async function readRendererAsset(file: string, path: string, webRenderer: boolea
 }
 
 export async function createNativeWorkbench(options: Options = {}) {
-  const computer = computerConfig();
   const port = options.port ?? Number(process.env.PORT || 8765);
   const codexHome = options.codexHome || process.env.CODEX_HOME || join(homedir(), '.codex');
   const workspace = await realpath(options.workspace || process.env.AGENTS_WORKSPACE || homedir());
@@ -233,6 +235,18 @@ export async function createNativeWorkbench(options: Options = {}) {
     ? pinnedHtml.replace('<head>', '<head><meta name="yard-pinned-tool" content="true">') : pinnedHtml;
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   await chmod(dataDir, 0o700);
+  // Browser processes belong to Yard, independently of a page or REPL kernel.
+  // Opening Chromium remains lazy and requires an explicit independent binary.
+  const iabOptions = process.env.YARD_BROWSER_EXECUTABLE ? {
+    socketPath: join(dataDir, 'browser.sock'), dataDirectory: join(dataDir, 'browser'),
+    executablePath: process.env.YARD_BROWSER_EXECUTABLE, headless: process.env.YARD_BROWSER_HEADLESS !== 'false',
+  } : undefined;
+  const windowsChromePath = process.platform === 'linux' && process.env.YARD_CHROME_WINDOWS === 'true' ? join(dataDir, 'chrome-windows.sock') : undefined;
+  let iab: Awaited<ReturnType<typeof startIabHost>> | undefined;
+  let windowsChrome: Awaited<ReturnType<typeof startWindowsChromeBridge>> | undefined;
+  const browserPaths = [iabOptions?.socketPath, windowsChromePath, process.env.YARD_BROWSER_BACKEND_PATHS].filter(Boolean).join(process.platform === 'win32' ? ';' : ':');
+  const sessionEnvironment = { ...process.env, CODEX_HOME: codexHome, ...(iabOptions ? { YARD_IAB_SOCKET: iabOptions.socketPath } : {}),
+    ...(browserPaths ? { YARD_BROWSER_BACKEND_PATHS: browserPaths } : {}) };
   async function load(name: string, fallback: unknown) {
     try { return JSON.parse(await readFile(join(dataDir, name), 'utf8')); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fallback; throw error; }
@@ -339,8 +353,8 @@ export async function createNativeWorkbench(options: Options = {}) {
     connections: hostId => [...(hostId === 'local' ? [control] : fileConnections.has(hostId) ? [fileConnections.get(hostId)!] : []), ...[...clients.values()].flatMap(connections => {
       const connection = connections.get(hostId); return connection ? [connection] : [];
     })],
-    async sessionConfig(hostId, provider, connection) {
-      const config = hostId === 'local' ? { ...hostTools.config } : {};
+    async sessionConfig(hostId, provider, connection, cwd) {
+      const config = await sessionToolsConfig(hostId, cwd || workspace);
       const catalog = await modelProviders.catalogPath(hostId, connection, provider);
       if (catalog) return { ...config, model_catalog_json: catalog };
       if (!isDeepseekProvider(await modelProviders.definition(hostId, connection, provider))) return config;
@@ -474,10 +488,15 @@ export async function createNativeWorkbench(options: Options = {}) {
     supportsSidebarState: sidebar.supportsHost,
     projectIdForStart: async (project: NativeProject, hostId: string) => await threadProjects('getThreadStartProjectId', {
       projectKind: project.projectKind, projectId: project.projectId, ...(project.projectKind === 'remote' ? { hostId } : {}) }) as string | null,
-    projectlessRoot: join(dataDir, 'workspaces'), configFor: (hostId: string) => hostId === 'local' ? hostTools.config : {},
+    projectlessRoot: join(dataDir, 'workspaces'), configFor: sessionToolsConfig,
     setMembership: setNativeMembership };
   // Acquire scheduler ownership before opening the shared tools socket.
   const automations = createAutomations({ ...taskHost, dataDir, changed: () => broadcast({ type: 'automation-runs-updated' }),
+    request: providerRouting.request.bind(providerRouting),
+    async resolveProjectId(hostId, projectId) {
+      await sidebar.ensureHost(hostId);
+      return sidebar.supportsHost(hostId) ? sidebar.resolveProjectId(hostId, projectId) : projectId;
+    },
     runChanged(run) {
       if (run.threadId && run.turnId) notifications.watch(run.hostId, run.threadId, run.turnId);
       else if (run.status === 'failed') void notifications.publish({ id: 'automation-failed:' + run.id, kind: 'failed',
@@ -489,7 +508,14 @@ export async function createNativeWorkbench(options: Options = {}) {
   const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'),
     tools: nativeTools.tools, callTool: nativeTools.callTool,
   }).catch(async error => { await automations.close(); throw error; });
-  Object.assign(hostTools.config, computer);
+  async function sessionToolsConfig(hostId: string, cwd: string, overrides: Record<string, unknown> = {}) {
+    if (hostId !== 'local') return overrides;
+    const { config } = await control.request('config/read', { includeLayers: false, cwd });
+    const installed = record(record(config).features).plugins === false ? [] : installedPluginIds(await control.request('plugin/installed', { cwds: [cwd] }));
+    const folded = nodeReplOverrides(record(config), overrides);
+    return { ...hostTools.config, ...standalonePluginConfig(installed), ...folded.remaining,
+      ...nodeReplConfig(folded.effective, sessionEnvironment, installed) };
+  }
   const notifications = await createBrowserNotifications({ dataDir, connectionFor: toolConnection,
     hostIds: () => ['local', ...remoteProfiles().filter(host => host.autoConnect).map(host => host.hostId)],
     fetch: options.notificationFetch, intervalMs: options.notificationIntervalMs, subject: process.env.YARD_WEB_PUSH_SUBJECT })
@@ -942,13 +968,16 @@ export async function createNativeWorkbench(options: Options = {}) {
         delete params.yardPermissionChoice;
       }
       if (hostId === 'local' && (method === 'thread/start' || method === 'thread/fork')) {
-        params.config = { ...record(params.config), ...hostTools.config };
+        const cwd = typeof params.cwd === 'string' ? params.cwd : method === 'thread/fork'
+          ? (await connection.request('thread/read', { threadId: params.threadId, includeTurns: false })).thread.cwd : workspace;
+        params.config = await sessionToolsConfig(hostId, cwd, record(params.config));
         requestParams = params;
       }
       if (hostId === 'local' && method === 'thread/resume') {
         const loaded = await connection.request('thread/loaded/list', {});
         if (!loaded.data.some(id => id === params.threadId)) {
-          params.config = { ...record(params.config), ...hostTools.config };
+          const cwd = typeof params.cwd === 'string' ? params.cwd : (await connection.request('thread/read', { threadId: params.threadId, includeTurns: false })).thread.cwd;
+          params.config = await sessionToolsConfig(hostId, cwd, record(params.config));
           requestParams = params;
         }
       }
@@ -1295,6 +1324,12 @@ export async function createNativeWorkbench(options: Options = {}) {
       case 'set-thread-pinned': return threadPins.set(params);
       case 'set-pinned-threads-order': return threadPins.setOrder(params);
       case 'custom-avatars': return typeof params.avatarId === 'string' ? petAssets.loadAvatar(params.avatarId) : petAssets.load();
+      case 'iab-browser': {
+        if (hostId !== 'local') throw new Error('Browser belongs to this Yard execution host.');
+        if (!iab) throw new Error('Set YARD_BROWSER_EXECUTABLE to an independent Chromium executable and restart Yard.');
+        if (typeof params.sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(params.sessionId)) throw new Error('A conversation ID is required.');
+        return iab.panel(params as unknown as IabPanelRequest);
+      }
       case 'terminal': return terminals.get(client)!.request(params.operation as TerminalOperation, params.args as unknown[]);
       case 'queued-follow-up-send-lock-acquire':
       case 'queued-follow-up-send-lock-release': {
@@ -1311,7 +1346,8 @@ export async function createNativeWorkbench(options: Options = {}) {
       case 'codex-command-keymap-state': return { bindings: [], keymapPath: null, supported: false,
         primaryNumberShortcutTarget: settings['primary-number-shortcut-target'] ?? 'tabs' };
       case 'get-setting': return { value: settings[String(params.key)] };
-      case 'set-setting': settings[String(params.key)] = params.value; await persist(); petOverlay.settingChanged(String(params.key)); return { success: true };
+      case 'set-setting': settings[String(params.key)] = params.value; await persist(); petOverlay.settingChanged(String(params.key));
+        broadcast({ type: 'settings-updated', key: String(params.key) }); return { success: true };
       case 'get-global-state': await sidebar.ensureHost('local'); return { value: globals[String(params.key)] };
       case 'set-global-state': {
         const key = String(params.key);
@@ -1352,12 +1388,14 @@ export async function createNativeWorkbench(options: Options = {}) {
     }
   }
   try {
+    if (iabOptions) iab = await startIabHost(iabOptions);
+    if (windowsChromePath) windowsChrome = await startWindowsChromeBridge(windowsChromePath);
     await control.connect();
     await sidebar.ensureHost('local');
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
     automations.start();
     notifications.start();
-  } catch (error) { prewarmedThreads.close(); clearInterval(reconnectControl); await developmentPreviews.close(); await notifications.close(); await automations.close(); control.close(); await hostTools.close(); throw error; }
+  } catch (error) { prewarmedThreads.close(); clearInterval(reconnectControl); await iab?.close(); await windowsChrome?.close(); await developmentPreviews.close(); await notifications.close(); await automations.close(); control.close(); await hostTools.close(); throw error; }
   return {
     server, control, automations, notifications,
     url: 'http://127.0.0.1:' + (server.address() as import('node:net').AddressInfo).port,
@@ -1367,6 +1405,7 @@ export async function createNativeWorkbench(options: Options = {}) {
       await Promise.all([portForwarding.close(), developmentPreviews.close()]);
       await automations.close();
       await notifications.close();
+      await iab?.close(); await windowsChrome?.close();
       chromeClients.close();
       files.close();
       await Promise.all([...browsers.values()].map(browser => browser.close()));

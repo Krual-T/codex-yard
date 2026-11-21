@@ -49,6 +49,7 @@ let log = ''; child.stdout.on('data', chunk => { log += chunk; }); child.stderr.
 let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined, pageConnection: CodexConnection | undefined;
 const checks: string[] = [], report: Record<string, unknown> = { checks, provider: 'loopback scripted Responses', root };
 const appOptions = { port: 0, dataDir, workspace: root, socketPath, codexHome,
+  sourceWorkspace: process.argv.includes('--source-workspace'),
   hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: async () => new Response('Offline fixture', { status: 503 }) };
 async function waitUntil<T>(read: () => Promise<T>, matches: (value: T) => boolean, timeout = 30000): Promise<T> {
   const until = Date.now() + timeout;
@@ -136,12 +137,12 @@ try {
   assert.equal((await inbox()).items.find(item => item.id === scheduled.id)!.status, 'ARCHIVED');
   checks.push('An archived scheduled result keeps its history and receipt after backend deletion and Yard restart');
   if (process.argv.includes('--ui')) {
-    const ui = spawn(process.execPath, ['scripts/verify-automations.ts'], { cwd: process.cwd(),
+    const ui = spawn(process.execPath, ['scripts/verify-automations.ts', ...(process.argv.includes('--source-workspace') ? ['--source-workspace'] : [])], { cwd: process.cwd(),
       env: { ...process.env, AGENTS_TEST_CODEX_SOCKET: socketPath, AGENTS_TEST_CODEX_HOME: codexHome,
         AGENTS_AUTOMATIONS_EVIDENCE: join(output, 'ui') }, stdio: ['ignore', 'pipe', 'pipe'] });
     let uiLog = ''; ui.stdout.on('data', chunk => { uiLog += chunk; }); ui.stderr.on('data', chunk => { uiLog += chunk; });
     const [exitCode] = await once(ui, 'exit'); await writeFile(join(output, 'ui.log'), uiLog);
-    assert.equal(exitCode, 0, uiLog); checks.push('Pinned Scheduled UI creates, runs and pauses a task on the actual CLI backend');
+    assert.equal(exitCode, 0, uiLog); checks.push('Scheduled UI creates, runs and pauses a task on the actual CLI backend');
   }
   report.ok = true;
 } catch (error) { report.ok = false; report.failure = String(error); process.exitCode = 1; }

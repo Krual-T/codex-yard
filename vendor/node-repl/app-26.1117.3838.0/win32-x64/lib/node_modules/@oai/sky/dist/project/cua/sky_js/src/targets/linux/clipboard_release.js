@@ -1,0 +1,1 @@
+import{__awaiter as i}from"../../../../../../lib/js/oai_js/node_modules/tslib/tslib.es6.js";import{sky_linux as o}from"./sky_linux.js";function t(t){return function(n){return i(this,void 0,void 0,(function*(){yield o("clipboard_release",{options:t,input:n})}))}}export{t as create_clipboard_release};

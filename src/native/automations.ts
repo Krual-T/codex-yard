@@ -4,7 +4,7 @@ import { mkdir, mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { CodexConnection } from '../../lib/codex.ts';
 import { errorMessage, isRecord } from '../../lib/codex-protocol.ts';
-import type { Page, RpcMessage, TurnSummary } from '../../lib/codex-protocol.ts';
+import type { Page, RpcMessage, ThreadResponse, TurnSummary } from '../../lib/codex-protocol.ts';
 import type { NativeAppToolsOptions, NativeProject } from '../../lib/native-app-tools.ts';
 import { validateModel } from '../../vendor/native-app-tools/26.1013.40934/portable-tools.mjs';
 import type { AvailableModel } from '../../vendor/native-app-tools/26.1013.40934/portable-tools.mjs';
@@ -13,6 +13,9 @@ import type { Recurrence } from './automation-recurrence.ts';
 import { archivedAutomationThreads, automationThreadMissing, automationTurnIsRead, automationTurnResult, readAutomationThread } from './automation-projection.ts';
 import type { AutomationThread } from './automation-projection.ts';
 import { record } from './protocol.ts';
+import { modelSelection } from './model-selection.ts';
+import type { ProviderRouting } from './provider-routing.ts';
+import type { ObjectValue } from './protocol.ts';
 
 export interface Automation extends Recurrence {
   id: string; kind: 'cron'; name: string; prompt: string; status: 'ACTIVE' | 'PAUSED' | 'DELETED';
@@ -47,6 +50,8 @@ interface Options extends Pick<NativeAppToolsOptions, 'connectionFor' | 'listPro
   dataDir: string;
   changed(): void;
   runChanged?(run: AutomationRun): void;
+  resolveProjectId?(hostId: string, projectId: string): Promise<string | undefined>;
+  request?: ProviderRouting['request'];
   now?: () => number;
   intervalMs?: number;
 }
@@ -146,6 +151,17 @@ export function createAutomations(options: Options) {
     putRun(run);
   }
   function assertOpen() { if (closing) throw new Error('Yard 服务正在关闭。'); }
+  // Sidebar migration preserves old IDs in backend metadata. Use that explicit
+  // identity mapping so a removed project is never replaced by a similar path.
+  async function migrateProject(item: Automation) {
+    if (item.target.type !== 'project' || !options.resolveProjectId) return item;
+    const projectId = await options.resolveProjectId(item.hostId, item.target.projectId);
+    assertOpen();
+    const current = task(item.id);
+    if (current.updatedAt !== item.updatedAt || !projectId || projectId === item.target.projectId) return current;
+    const updated = { ...current, target: { type: 'project' as const, projectId }, updatedAt: Math.max(now(), current.updatedAt + 1) };
+    putTask(updated); options.changed(); return updated;
+  }
   async function save(value: unknown, update = false) {
     assertOpen();
     const p = record(value), old = update ? task(p.id) : undefined;
@@ -156,7 +172,10 @@ export function createAutomations(options: Options) {
     if (p.notificationPolicy != null && p.notificationPolicy !== 'failed_runs_only') throw new Error('无效的通知策略。');
     const status = p.status ?? old?.status ?? 'ACTIVE';
     if (status !== 'ACTIVE' && status !== 'PAUSED') throw new Error('无效的任务状态。');
-    const projectId = p.projectId === undefined ? old?.target.type === 'project' ? old.target.projectId : null : p.projectId;
+    let projectId = p.projectId === undefined ? old?.target.type === 'project' ? old.target.projectId : null : p.projectId;
+    if (old?.target.type === 'project' && projectId === old.target.projectId && options.resolveProjectId) {
+      projectId = await options.resolveProjectId(old.hostId, old.target.projectId) ?? projectId;
+    }
     const project = projectId == null ? null : (await options.listProjects()).find(p => p.projectId === projectId);
     if (projectId != null && !project) throw new Error('项目不存在，请重新选择项目。');
     const effort = optionalText(p.reasoningEffort, '推理强度');
@@ -183,12 +202,19 @@ export function createAutomations(options: Options) {
     };
     putTask(item); options.changed(); return { item };
   }
+  function modelRequest<T>(connection: CodexConnection, item: Automation, method: string, params: ObjectValue, mutating = false): Promise<T> {
+    // The provider picker saves qualified identities; legacy plain slugs keep
+    // inheriting the backend's configured provider.
+    return options.request && modelSelection(item.model)
+      ? options.request(item.hostId, connection, method, params, { mutating }) as Promise<T>
+      : connection.request<T>(method, params, { mutating });
+  }
   async function checkModel(connection: CodexConnection, item: Automation) {
     if (!item.model) return;
     const all: AvailableModel[] = [], cursors = new Set<string>();
     let cursor: string | null = null;
     do {
-      const page: Page<AvailableModel> = await connection.request<Page<AvailableModel>>('model/list', { limit: 100, ...(cursor ? { cursor } : {}) });
+      const page: Page<AvailableModel> = await modelRequest(connection, item, 'model/list', { limit: 100, ...(cursor ? { cursor } : {}) });
       all.push(...page.data); cursor = page.nextCursor;
       if (cursor && cursors.has(cursor)) throw new Error('模型列表游标未前进。');
       if (cursor) cursors.add(cursor);
@@ -204,18 +230,18 @@ export function createAutomations(options: Options) {
       let cwd = project?.path;
       if (!cwd) { await mkdir(options.projectlessRoot, { recursive: true }); cwd = await mkdtemp(join(options.projectlessRoot, 'scheduled-')); }
       changeRun(run, { sourceCwd: cwd });
-      const { thread } = await connection.request('thread/start', { cwd, historyMode: 'paginated',
+      const { thread } = await modelRequest<ThreadResponse>(connection, item, 'thread/start', { cwd, historyMode: 'paginated',
         ...(projectId ? { projectId } : {}),
-        config: { ...options.configFor(item.hostId), ...(item.reasoningEffort ? { model_reasoning_effort: item.reasoningEffort } : {}) },
+        config: { ...await options.configFor(item.hostId, cwd), ...(item.reasoningEffort ? { model_reasoning_effort: item.reasoningEffort } : {}) },
         ...(item.model ? { model: item.model } : {}),
-      }, { mutating: true });
+      }, true);
       changeRun(run, { threadId: thread.id });
       await options.setMembership(thread.id, item.hostId, project, cwd, thread);
       await connection.request('thread/name/set', { threadId: thread.id, name: item.name }, { mutating: true });
-      const { turn } = await connection.request('turn/start', {
+      const { turn } = await modelRequest<{ turn: TurnSummary }>(connection, item, 'turn/start', {
         threadId: thread.id, clientUserMessageId: run.id, input: [{ type: 'text', text: item.prompt, text_elements: [] }],
         ...(item.model ? { model: item.model } : {}), ...(item.reasoningEffort ? { effort: item.reasoningEffort } : {}),
-      }, { mutating: true });
+      }, true);
       applyTurn(run, turn);
     } catch (error) {
       changeRun(run, { phase: isRecord(error) && error.uncertain === true ? 'uncertain' : 'failed', failure: errorMessage(error) });
@@ -235,7 +261,7 @@ export function createAutomations(options: Options) {
     if (preparing.has(id)) throw new Error('该任务正在启动。');
     preparing.add(id);
     try {
-      let item = task(id);
+      let item = await migrateProject(task(id));
       if (item.status === 'DELETED' || !manual && item.status !== 'ACTIVE') return null;
       if (runs().some(run => run.automationId === id)) throw new Error('该任务还有运行中或结果待核实的记录，请先查看已有会话。');
       if (runs().length >= 3) throw new Error('已有三个定时任务在执行，请稍后重试。');
@@ -499,7 +525,8 @@ export function createAutomations(options: Options) {
     assertOpen();
     const p = isRecord(input.params) ? input.params : input;
     switch (endpoint) {
-      case 'list-automations': return { items: list().filter(item => item.status !== 'DELETED') };
+      case 'list-automations': return { items: await Promise.all(list().filter(item => item.status !== 'DELETED')
+        .map(item => migrateProject(item).catch(() => task(item.id)))) };
       case 'automation-create': return save(p);
       case 'automation-update': return save(p, true);
       case 'automation-delete': {

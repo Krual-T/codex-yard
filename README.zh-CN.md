@@ -12,6 +12,8 @@
 
 这是一个实验阶段的独立项目。当前界面对标 **Codex App 26.1013.40934**，自有宿主和扩展采用 TypeScript + React。仓库内的原版界面是编译后的 JS、CSS、字体和其他资源，不包含 App 原始 TypeScript / TSX 源码。[第三方组件说明](THIRD_PARTY.md)
 
+原版 `node_repl`、Computer Use、五个文件插件和 Browser/Chrome 的独立安装、Windows/WSL 接入与回退见[插件接入说明](docs/standalone-plugins.md)。
+
 ## 当前功能与后续方向
 
 当前支持共享 daemon 会话、本机与 SSH 项目、SSH 连接发现和新增、侧栏聊天置顶、工作区标签、历史恢复、待发消息、文件与图片粘贴、侧边对话、文件、终端、右栏网页，以及聊天中的交互 HTML 可视化。
@@ -116,9 +118,9 @@ Markdown 文件预览通过 Yard 的文件接口加载引用图片，沿用文�
 
 Plugins 页面通过所选 Codex 主机的原生协议管理 marketplace、安装和卸载插件，并发起 MCP 授权。已有 Skills 和 MCP 工具沿用后端配置。依赖特定应用宿主的插件，还需要为 Yard 准备能够独立运行的对应服务。
 
-仓库 marketplace 提供 `yard-node` 持久 JavaScript、`yard-artifacts` 本地 Word/PDF/表格/PPT/模板工作流，以及 `yard-computer` 的 Linux X11 和显式选择的 Windows 主屏驱动，均使用独立依赖。浏览器控制接公开的 Chrome DevTools MCP，标题整理接已有插件。配置中“启用”后，仍需确认插件安装、运行时到位和实际操作成功。
+Yard 直接运行原版 `node_repl`，使用独立 Node 和 Codex CLI，保留原工具名称、描述、参数和沙箱。marketplace 恢复 `documents`、`pdf`、`spreadsheets`、`presentations`、`template-creator`、`computer-use`、`browser`、`chrome` 八个独立原名包；五项文件能力保留各自原 Skill 和脚本，通过显式复制的原版运行库工作。Linux Computer Use 接原版 Sky 助手，需要明确选择 X11 桌面和它的无障碍会话。
 
-Linux Computer Use 需要 `xdotool`、ImageMagick、`xclip` 和 util-linux，在 Yard 的 `.env` 设置 `YARD_COMPUTER_DISPLAY`，需要时另设 `YARD_COMPUTER_XAUTHORITY`，再新开本机对话。Windows 需要独立 Windows Node，且进程必须处在已登录、未锁定的交互桌面会话；SSH/服务的 Session 0 无法控制该桌面。[安装命令、文件运行时、浏览器与标题接入、平台边界和验收步骤](docs/standalone-plugins.md)
+新建、派生、预热、定时和冷恢复的本机会话按目标项目读取配置，再注入会话级覆盖。启动 Yard 不写共享 `config.toml`；已加载会话保留后端原工具和变量。标题整理沿用已有插件，`codex_apps` 连接器另行授权。当前原版可执行资源覆盖 Linux x64；Chrome 仍需官方扩展和独立 native host，原版内嵌 Browser 的宿主尚未提供。[安装、原运行库复制、平台边界与验收步骤](docs/standalone-plugins.md)
 
 ## 定时任务
 

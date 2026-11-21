@@ -12,6 +12,8 @@ import WebSocket from 'ws';
 import { chromium } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { record } from '../src/native/protocol.ts';
+import { filePluginNames } from '../lib/standalone-tools.ts';
+const packages = [...filePluginNames, 'computer-use', 'browser', 'chrome'];
 
 const root = await mkdtemp('/tmp/yard-plugin-cli-');
 const codexHome = join(root, 'codex'), workspace = join(root, 'workspace'), dataDir = join(root, 'data');
@@ -20,7 +22,7 @@ await Promise.all([mkdir(codexHome), mkdir(workspace), mkdir(dataDir)]);
 const execute = promisify(execFile);
 await execute('git', ['init', '-q', workspace]);
 await cp(resolve('.agents/plugins'), join(workspace, '.agents/plugins'), { recursive: true });
-await cp(resolve('plugins'), join(workspace, 'plugins'), { recursive: true });
+await cp(resolve('plugins'), join(workspace, 'plugins'), { recursive: true, verbatimSymlinks: true });
 await writeFile(join(codexHome, 'config.toml'), `model = "gpt-5.2-codex"
 model_provider = "fixture"
 approval_policy = "never"
@@ -54,6 +56,7 @@ try {
     catch { if (child.exitCode !== null || Date.now() > deadline) throw new Error(log || 'CLI startup timed out'); await delay(50); }
   }
   app = await createNativeWorkbench({ port: 0, dataDir, workspace, socketPath, codexHome,
+    sourceWorkspace: process.argv.includes('--source-workspace'),
     hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: async () => new Response('Offline fixture', { status: 503 }) });
   report.cli = app.control.server?.userAgent;
   const messages: Record<string, any>[] = [];
@@ -80,32 +83,27 @@ try {
   assert.equal(added.marketplaceName, 'codex-yard');
   const listing = await rpc('plugin/list', { cwds: [workspace], marketplaceKinds: ['local'] });
   const market = listing.marketplaces.find((value: any) => value.name === 'codex-yard');
-  assert.ok(market?.plugins.some((value: any) => value.name === 'yard-computer'));
-  checks.push('Real CLI discovers the repository-owned Codex Yard marketplace through the Web bridge');
-  const before = await rpc('plugin/read', { marketplacePath, pluginName: 'yard-computer' });
-  assert.equal(before.plugin.summary.installed, false);
-  assert.ok(before.plugin.mcpServers.includes('yard_computer'));
-  await rpc('plugin/install', { marketplacePath, pluginName: 'yard-computer', installAttemptId: 'yard-validation' });
-  const after = await rpc('plugin/read', { marketplacePath, pluginName: 'yard-computer' });
-  assert.equal(after.plugin.summary.installed, true);
-  assert.equal(after.plugin.summary.enabled, true);
-  checks.push('Real CLI installs and enables the self-contained Computer Use plugin without a desktop App');
-  const installed = await rpc('plugin/installed', { cwds: [workspace] });
-  assert.ok(installed.marketplaces.flatMap((value: any) => value.plugins).some((value: any) => value.id === 'yard-computer@codex-yard' && value.installed));
-  const skills = await rpc('skills/list', { cwds: [workspace], forceReload: true });
-  assert.ok(skills.data.flatMap((value: any) => value.skills).some((value: any) => value.name === 'yard-computer:use-computer' && value.pluginId === 'yard-computer@codex-yard'));
-  checks.push('The installed plugin contributes its Skill to the actual CLI inventory');
-  for (const name of ['yard-node', 'yard-artifacts']) {
+  assert.deepEqual(market.plugins.map((value: any) => value.name).sort(), [...packages].sort());
+  checks.push('Real CLI discovers all eight canonical plugin packages through the Yard bridge');
+  for (const name of packages) {
     await rpc('plugin/install', { marketplacePath, pluginName: name, installAttemptId: 'yard-validation-' + name });
     const plugin = await rpc('plugin/read', { marketplacePath, pluginName: name });
     assert.equal(plugin.plugin.summary.installed, true);
     assert.equal(plugin.plugin.summary.enabled, true);
   }
-  const allSkills = await rpc('skills/list', { cwds: [workspace], forceReload: true });
-  for (const name of ['yard-node:javascript', 'yard-artifacts:files']) {
-    assert.ok(allSkills.data.flatMap((value: any) => value.skills).some((value: any) => value.name === name));
+  for (const enabled of [false, true]) {
+    await rpc('config/batchWrite', { edits: [{ keyPath: 'plugins."computer-use@codex-yard".enabled', value: enabled, mergeStrategy: 'upsert' }],
+      filePath: null, expectedVersion: null, reloadUserConfig: true });
+    assert.equal((await rpc('plugin/read', { marketplacePath, pluginName: 'computer-use' })).plugin.summary.enabled, enabled);
   }
-  checks.push('The real CLI installs standalone JavaScript and file-artifact packages and loads both Skills');
+  checks.push('Native plugin enable controls use the real CLI configuration contract');
+  const allSkills = await rpc('skills/list', { cwds: [workspace], forceReload: true });
+  const expectedSkills = ['documents:documents', 'pdf:pdf', 'spreadsheets:Spreadsheets', 'presentations:Presentations',
+    'template-creator:template-creator', 'computer-use:computer-use', 'browser:control-in-app-browser', 'chrome:control-chrome'];
+  for (const name of expectedSkills) {
+    assert.ok(allSkills.data.flatMap((value: any) => value.skills).some((value: any) => value.name === name), name);
+  }
+  checks.push('Real CLI installs the original packages and loads the five separate file Skills and computer/browser Skills with their original names');
   if (process.argv.includes('--ui')) {
     const output = resolve(process.env.AGENTS_PLUGINS_EVIDENCE ?? '.local/plugins-cli');
     await mkdir(output, { recursive: true });
@@ -116,12 +114,13 @@ try {
     page.on('pageerror', cause => errors.push(cause.message));
     try {
       await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/plugins'), { waitUntil: 'commit' });
-      await page.getByRole('link', { name: /yard[- ]computer/i }).first().waitFor({ timeout: 60000 });
-      await page.getByRole('link', { name: /yard[- ]computer/i }).first().click();
-      await page.getByRole('heading', { name: /yard[- ]computer/i }).waitFor();
+      const documentPlugin = page.getByRole(process.argv.includes('--source-workspace') ? 'button' : 'link', { name: /^Documents$/i }).first();
+      await documentPlugin.waitFor({ timeout: 60000 });
+      await documentPlugin.click();
+      await page.getByText('26.909.61513', { exact: true }).waitFor();
       await page.screenshot({ path: join(output, 'plugins.png') });
       assert.deepEqual(errors, []);
-      checks.push('Pinned original Plugins page renders the installed standalone plugin with the real CLI and no page exceptions');
+      checks.push('Plugins page renders the installed standalone plugin with the real CLI and no page exceptions');
     } catch (cause) {
       report.uiText = await page.locator('body').innerText();
       await page.screenshot({ path: join(output, 'plugins-failure.png') });
@@ -130,44 +129,62 @@ try {
   }
   const thread = await rpc('thread/start', { cwd: workspace, ephemeral: true });
   const threadId = thread.thread.id;
-  const inventory = await rpc('mcpServerStatus/list', { threadId, serverName: 'yard_computer' });
-  assert.ok(inventory.data.some((value: any) => Object.keys(value.tools ?? {}).includes('computer')),
-    'The real CLI must initialize the bundled stdio MCP process and discover its computer tool');
-  const unavailable = await rpc('mcpServer/tool/call', { threadId, server: 'yard_computer', tool: 'computer', arguments: { type: 'screenshot' } });
-  assert.equal(unavailable.isError, true);
-  assert.match(JSON.stringify(unavailable.content), /display|DISPLAY/);
-  checks.push('Actual CLI launches the plugin MCP and returns actionable missing-display errors instead of importing desktop services');
-  const nodeInventory = await rpc('mcpServerStatus/list', { threadId, serverName: 'yard_node' });
-  assert.ok(nodeInventory.data.some((value: any) => Object.keys(value.tools ?? {}).includes('evaluate')));
-  const evaluate = (code: string) => rpc('mcpServer/tool/call', { threadId, server: 'yard_node', tool: 'evaluate', arguments: { code } });
-  const evaluated = await evaluate('let count = 41; await Promise.resolve(); ++count');
+  const inventory = await rpc('mcpServerStatus/list', { threadId, serverName: 'node_repl' });
+  const nodeServer = inventory.data.find((value: any) => value.name === 'node_repl');
+  assert.equal(nodeServer?.startupStatus?.status ?? 'ready', 'ready', JSON.stringify(nodeServer));
+  assert.deepEqual(Object.keys(nodeServer.tools).sort(), ['js', 'js_add_node_module_dir', 'js_reset', 'turn_ended']);
+  const originalTools = JSON.parse(await readFile(new URL('../test/fixtures/original-node-repl-tools.json', import.meta.url), 'utf8'));
+  // The original binary omits js readOnly annotations when the UI negotiates
+  // approval elicitation. Its names, descriptions and schemas stay identical.
+  const actualTools = structuredClone(nodeServer.tools);
+  const expectedTools = structuredClone(originalTools);
+  if (!actualTools.js.annotations) delete expectedTools.js.annotations;
+  assert.deepEqual(actualTools, expectedTools);
+  report.originalDescriptorsMatch = true;
+  const evaluate = (code: string, timeout_ms?: number) => rpc('mcpServer/tool/call', { threadId, server: 'node_repl', tool: 'js', arguments: { code, ...(timeout_ms ? { timeout_ms } : {}) } });
+  const evaluated = await evaluate('const count = 41; nodeRepl.write(await Promise.resolve(count + 1));');
   assert.notEqual(evaluated.isError, true, JSON.stringify(evaluated));
   assert.match(JSON.stringify(evaluated.content), /42/);
-  const image = await evaluate('yardNode.emitImage({bytes:Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X6AAAAABJRU5ErkJggg==","base64"),mimeType:"image/png"})');
+  assert.notEqual((await evaluate('let count = 42; nodeRepl.write(count);')).isError, true);
+  const image = await evaluate('await nodeRepl.emitImage({bytes:Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X6AAAAABJRU5ErkJggg==","base64"),mimeType:"image/png"})');
   assert.ok(image.content.some((value: any) => value.type === 'image' && value.mimeType === 'image/png'));
-  checks.push('Actual CLI evaluates persistent JavaScript with top-level await and receives an image tool result');
-  const started = join(workspace, 'started'), completed = join(workspace, 'completed');
-  void evaluate(`var fs = await yardNode.import('node:fs/promises'); await fs.writeFile(${JSON.stringify(started)}, 'started'); await new Promise(resolve => setTimeout(resolve, 1200)); count += 1; await fs.writeFile(${JSON.stringify(completed)}, 'completed'); count`).catch(() => {});
-  const workDeadline = Date.now() + 15000;
-  for (;;) { try { await access(started); break; } catch { assert.ok(Date.now() < workDeadline, 'JavaScript did not start'); await delay(30); } }
+  checks.push('Original node_repl exposes exactly its four native tools, supports redeclaration and returns native image output');
+  // Administrative tool calls are read-only even in a full-access thread.
+  // Observe persistence through a binding instead of writing marker files.
+  void evaluate('await new Promise(resolve => setTimeout(resolve, 1200)); count += 1; nodeRepl.write(count);').catch(() => {});
+  await delay(150);
   socket!.terminate();
-  for (;;) { try { assert.equal(await readFile(completed, 'utf8'), 'completed'); break; } catch { assert.ok(Date.now() < workDeadline, 'JavaScript stopped with the Yard connection'); await delay(30); } }
+  await delay(1400);
   await connect();
-  assert.match(JSON.stringify((await evaluate('count')).content), /43/);
+  assert.match(JSON.stringify((await evaluate('nodeRepl.write(count);')).content), /43/);
   checks.push('Started JavaScript completes after the Yard client disconnects, and the same kernel retains its variable after reconnecting');
-  await rpc('mcpServer/tool/call', { threadId, server: 'yard_node', tool: 'reset', arguments: {} });
-  assert.match(JSON.stringify((await evaluate('typeof count')).content), /undefined/);
+  await rpc('mcpServer/tool/call', { threadId, server: 'node_repl', tool: 'js_reset', arguments: {} });
+  assert.match(JSON.stringify((await evaluate('nodeRepl.write(typeof count);')).content), /undefined/);
   checks.push('The real CLI resets the standalone JavaScript kernel');
-  for (const name of ['yard-node', 'yard-artifacts']) {
+  const originalRoot = process.env.YARD_NODE_REPL_ROOT;
+  process.env.YARD_NODE_REPL_ROOT = join(root, 'missing-runtime');
+  try { for (const state of ['disabled', 'optional', 'required'] as const) {
+    const config = { 'mcp_servers.node_repl': { enabled: state !== 'disabled', required: state === 'required' } };
+    if (state === 'required') {
+      await assert.rejects(rpc('thread/start', { cwd: workspace, ephemeral: true, config }), /required|MCP|mcp|spawn|No such file/);
+    } else {
+      const started = await rpc('thread/start', { cwd: workspace, ephemeral: true, config });
+      assert.ok(started.thread.id);
+      const status = await rpc('mcpServerStatus/list', { threadId: started.thread.id, serverName: 'node_repl' });
+      assert.ok(!status.data.some((server: any) => server.runtimeStatus === 'connected'));
+    }
+  } } finally {
+    if (originalRoot === undefined) delete process.env.YARD_NODE_REPL_ROOT;
+    else process.env.YARD_NODE_REPL_ROOT = originalRoot;
+  }
+  checks.push('Missing original runtime preserves native disabled/optional/required behavior: ordinary chats start, required startup fails');
+  for (const name of packages) {
     await rpc('plugin/uninstall', { pluginId: name + '@codex-yard' });
     assert.equal((await rpc('plugin/read', { marketplacePath, pluginName: name })).plugin.summary.installed, false);
   }
-  await rpc('plugin/uninstall', { pluginId: 'yard-computer@codex-yard' });
-  const removed = await rpc('plugin/read', { marketplacePath, pluginName: 'yard-computer' });
-  assert.equal(removed.plugin.summary.installed, false);
   const removedSkills = await rpc('skills/list', { cwds: [workspace], forceReload: true });
-  assert.ok(!removedSkills.data.flatMap((value: any) => value.skills).some((value: any) => ['yard-computer@codex-yard', 'yard-node@codex-yard', 'yard-artifacts@codex-yard'].includes(value.pluginId)));
-  checks.push('Uninstall removes the package and its Skill from the real CLI inventory');
+  assert.ok(!removedSkills.data.flatMap((value: any) => value.skills).some((value: any) => packages.some(name => value.pluginId === name + '@codex-yard')));
+  checks.push('Uninstall removes the canonical packages and their Skills from the real CLI inventory');
   await rpc('marketplace/remove', { marketplaceName: 'codex-yard' });
   checks.push('The native marketplace registration is removed through the same bridge');
   const config = await app.control.request('config/read', { includeLayers: false });

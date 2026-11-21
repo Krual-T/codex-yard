@@ -1,0 +1,53 @@
+{
+  "name": "@oai/sky",
+  "version": "0.7.8",
+  "author": "noahj",
+  "private": false,
+  "type": "module",
+  "main": "dist/project/cua/sky_js/src/index.js",
+  "exports": {
+    ".": "./dist/project/cua/sky_js/src/index.js",
+    "./service": "./dist/project/cua/sky_js/src/service.js"
+  },
+  "bin": {
+    "sky_linux_arm64": "./bin/linux/sky_linux_arm64",
+    "sky_linux_x64": "./bin/linux/sky_linux_x64"
+  },
+  "files": [
+    "dist/**/*",
+    "docs/**/*",
+    "bin/**/*",
+    "dist/**/*"
+  ],
+  "dependencies": {
+    "@statsig/js-client": "^3.32.6"
+  },
+  "types": "dist/project/cua/sky_js/src/index.d.ts",
+  "publishConfig": {
+    "executableFiles": [
+      "bin/mac/normal/Codex Computer Use.app/Contents/MacOS/SkyComputerUseService",
+      "bin/mac/normal/Codex Computer Use.app/Contents/SharedSupport/CUALockScreenGuardian.app/Contents/MacOS/CUALockScreenGuardian",
+      "bin/mac/normal/Codex Computer Use.app/Contents/SharedSupport/Codex Computer Use Installer.app/Contents/MacOS/Codex Computer Use Installer",
+      "bin/mac/normal/Codex Computer Use.app/Contents/SharedSupport/Codex Computer Use Installer.app/Contents/Resources/CodexComputerUseAuthorizationPluginInstallerTool",
+      "bin/mac/normal/Codex Computer Use.app/Contents/SharedSupport/Codex Computer Use Installer.app/Contents/Resources/CodexComputerUseAuthorizationPlugin.bundle/Contents/MacOS/CodexComputerUseAuthorizationPlugin",
+      "bin/mac/normal/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient",
+      "bin/mac/relaxed/Codex Computer Use.app/Contents/MacOS/SkyComputerUseService",
+      "bin/mac/relaxed/Codex Computer Use.app/Contents/SharedSupport/CUALockScreenGuardian.app/Contents/MacOS/CUALockScreenGuardian",
+      "bin/mac/relaxed/Codex Computer Use.app/Contents/SharedSupport/Codex Computer Use Installer.app/Contents/MacOS/Codex Computer Use Installer",
+      "bin/mac/relaxed/Codex Computer Use.app/Contents/SharedSupport/Codex Computer Use Installer.app/Contents/Resources/CodexComputerUseAuthorizationPluginInstallerTool",
+      "bin/mac/relaxed/Codex Computer Use.app/Contents/SharedSupport/Codex Computer Use Installer.app/Contents/Resources/CodexComputerUseAuthorizationPlugin.bundle/Contents/MacOS/CodexComputerUseAuthorizationPlugin",
+      "bin/mac/relaxed/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"
+    ]
+  },
+  "scripts": {
+    "format": "oai-prettier --check --cache --ignore-path .gitignore '**/*.{cjs,mjs,js,jsx,ts,tsx,json,css,scss,md}' '!plugin/macos/computer-use-node-repl.md'",
+    "generate:docs": "bun scripts/generate-docs.ts",
+    "tarball": "bun scripts/tarball/tarball.ts",
+    "test": "bun test src",
+    "test:e2e": "bun test --timeout 600000 e2e",
+    "test:build": "bun scripts/test-build.ts",
+    "install:computer-use": "bun scripts/install-computer-use-package.ts",
+    "test:windows-wgc": "bun scripts/windows-wgc-e2e.ts",
+    "types": "tsc"
+  }
+}

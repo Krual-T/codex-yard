@@ -59,11 +59,13 @@ export function requestWorkspaceFetch<T>(send: Send, endpoint: string, params: R
 }
 
 export async function readWorkspaceHistory(send: Send, threadId: string, cursor: string | null, hostId: string) {
-  const [thread, page] = await Promise.all([
-    cursor ? null : requestWorkspaceRpc<ThreadResponse>(send, 'thread/read', { threadId, includeTurns: false }, { hostId }),
-    requestWorkspaceRpc<Page<TurnSummary>>(send, 'thread/turns/list', {
-      threadId, cursor, limit: 2, sortDirection: 'desc', itemsView: 'summary',
-    }, { hostId }),
-  ]);
-  return { thread: thread?.thread, turns: page.data.slice().reverse(), nextCursor: page.nextCursor };
+  // Read the receipt before its content so acknowledging this revision cannot
+  // consume activity newer than the history displayed by the transcript.
+  const thread = cursor ? null : await requestWorkspaceRpc<ThreadResponse>(send, 'thread/read',
+    { threadId, includeTurns: false }, { hostId });
+  const page = await requestWorkspaceRpc<Page<TurnSummary>>(send, 'thread/turns/list', {
+    threadId, cursor, limit: 2, sortDirection: 'desc', itemsView: 'summary',
+  }, { hostId });
+  return { thread: thread?.thread, turns: page.data.slice().reverse(), nextCursor: page.nextCursor,
+    ...(thread?.readState ? { readState: thread.readState } : {}) };
 }

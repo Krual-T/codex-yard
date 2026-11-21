@@ -3,8 +3,8 @@
 /** @jsxFrag React.Fragment */
 import type * as ReactRuntime from 'react';
 import type { Root } from 'react-dom/client';
-import type { StartupSidebar, StartupThread } from './startup-sidebar.ts';
-import { initialWorkspaceRoute } from './history-startup.ts';
+import { compareStartupThreads, visibleSidebarThreads, type StartupSidebar, type StartupThread } from './startup-sidebar.ts';
+import { initialWorkspaceRoute, parseWorkspaceThreadRoute } from './history-startup.ts';
 
 let React: typeof ReactRuntime;
 export interface StartupSidebarBridge {
@@ -296,7 +296,11 @@ export function mountStartupSidebar(runtime: typeof ReactRuntime, renderer: { cr
           {!!data?.projects.length && <h2>项目</h2>}
           {data?.projects.map(project => {
             const rows = data.threads.filter(row => row.projectId === project.id && !pinned.has(row.id));
+            const positions = new Map(project.threadOrder?.map((id, index) => [id, index]));
+            if (positions.size) rows.sort((a, b) => (positions.get(a.id) ?? Infinity) - (positions.get(b.id) ?? Infinity) || compareStartupThreads(a, b));
             const showAll = expanded.includes(project.id);
+            const selected = parseWorkspaceThreadRoute(selectedRoute);
+            const view = visibleSidebarThreads(rows, showAll ? Infinity : 5, selected?.hostId === 'local' ? selected.threadId : undefined);
             return <section key={project.id}><span className="yard-startup-project" title={project.label}>
               {/* Same FolderOpen path as the pinned renderer, without its deferred icon module or styles. */}
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -304,8 +308,8 @@ export function mountStartupSidebar(runtime: typeof ReactRuntime, renderer: { cr
               </svg>
               <span className="yard-startup-project-label">{project.label}</span>
             </span>
-              {(showAll ? rows : rows.slice(0, 5)).map(thread)}
-              {!showAll && rows.length > 5 && <button className="yard-startup-thread" onClick={() => setExpanded([...expanded, project.id])}>展开显示</button>}
+              {view.rows.map(thread)}
+              {view.hidden > 0 && <button className="yard-startup-thread" aria-label="展开显示" onClick={() => setExpanded([...expanded, project.id])}>展开显示（{view.hidden}）</button>}
             </section>;
           })}
           {data?.threads.some(row => !pinned.has(row.id) && !data.projects.some(project => project.id === row.projectId)) && <section className="yard-startup-recent"><h2>最近对话</h2>
