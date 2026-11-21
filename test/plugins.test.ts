@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createConnection } from 'node:net';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import WebSocket from 'ws';
 import { createNativeWorkbench } from '../src/native/server.ts';
-import { createFakeCodex, NO_REPLY } from './fake-codex.ts';
+import { createFakeCodex, fixtureThread, NO_REPLY } from './fake-codex.ts';
 import { nativeFixture } from './native-fixture.ts';
 
-async function fixture(t: import('node:test').TestContext) {
+async function fixture(t: import('node:test').TestContext, cloudEnabled = true) {
   const root = await mkdtemp('/tmp/yard-plugins-');
   const local = await createFakeCodex(root);
   t.after(async () => { await local.close(); await rm(root, { recursive: true, force: true }); });
@@ -17,6 +17,8 @@ async function fixture(t: import('node:test').TestContext) {
   const remote = await createFakeCodex(remoteRoot);
   t.after(async () => { await remote.close(); await rm(remoteRoot, { recursive: true, force: true }); });
   const { renderer, adapterPath } = await nativeFixture(root);
+  await mkdir(join(root, 'data'));
+  await writeFile(join(root, 'data/native-state.json'), JSON.stringify({ globals: { 'yard-plugin-network': { cloudEnabled, proxyUrl: '' } } }));
   const hostId = 'remote-ssh:plugin-fixture';
   const app = await createNativeWorkbench({ socketPath: local.socketPath, codexHome: join(root, 'codex'), dataDir: join(root, 'data'),
     workspace: root, renderer, adapterPath, port: 0,
@@ -38,8 +40,48 @@ async function fixture(t: import('node:test').TestContext) {
     socket.send(JSON.stringify({ type: 'mcp-request', hostId: selectedHost, request: { id: requestId, method, params } }));
     return (await until(value => value.type === 'mcp-response' && value.hostId === selectedHost && value.message.id === requestId)).message;
   }
-  return { local, remote, hostId, rpc, until, messages };
+  async function network(body: Record<string, unknown> = {}) {
+    const requestId = String(++id);
+    socket.send(JSON.stringify({ type: 'fetch', requestId, url: 'vscode://codex/plugin-network', body: JSON.stringify(body) }));
+    return until(value => value.type === 'fetch-response' && value.requestId === requestId);
+  }
+  return { local, remote, hostId, rpc, until, messages, network, root };
 }
+
+test('cloud inventory is off by default and cold resume/start never wait for plugin cloud RPCs', { timeout: 5000 }, async t => {
+  const h = await fixture(t, false);
+  h.local.handlers.set('plugin/installed', () => NO_REPLY);
+  h.local.handlers.set('plugin/list', () => NO_REPLY);
+  const cache = join(h.root, 'codex/plugins/cache/codex-yard/browser/1.0.0/.codex-plugin');
+  await mkdir(cache, { recursive: true });
+  await writeFile(join(cache, 'plugin.json'), JSON.stringify({ name: 'browser', interface: { displayName: 'Browser' } }));
+  h.local.handlers.set('config/read', () => ({ config: { plugins: { 'browser@codex-yard': { enabled: true } } } }));
+  const threadId = '00000000-0000-4000-8000-000000000011';
+  h.local.threads.set(threadId, fixtureThread(threadId, h.root));
+  const resumed = await h.rpc('thread/resume', { threadId, excludeTurns: true });
+  assert.ifError(resumed.error);
+  assert.equal(resumed.result.thread.id, threadId);
+  const started = await h.rpc('thread/start', { cwd: h.root });
+  assert.ok(started.result.thread.id);
+  const params = h.local.messages.find(message => message.method === 'thread/resume')!.params;
+  assert.equal((params.config as Record<string, unknown>)['plugins."browser@codex-yard".enabled'], true);
+  assert.match(JSON.stringify(params.config), /browser-service/);
+  const inventory = (await h.rpc('plugin/installed')).result;
+  assert.equal(inventory.marketplaces[0].plugins[0].id, 'browser@codex-yard');
+  assert.equal(h.local.messages.some(message => message.method === 'plugin/installed' || message.method === 'plugin/list'), false);
+  assert.deepEqual((await h.network()).body, { cloudEnabled: false, proxyUrl: '' });
+  const denied = await h.rpc('plugin/reconcile');
+  assert.match(denied.error.message, /Cloud plugin access is off/);
+  const saved = await h.network({ operation: 'save', cloudEnabled: true, proxyUrl: '7897' });
+  assert.deepEqual(saved.body, { cloudEnabled: true, proxyUrl: 'http://127.0.0.1:7897' });
+  const state = JSON.parse(await readFile(join(h.root, 'data/native-state.json'), 'utf8'));
+  assert.deepEqual(state.globals['yard-plugin-network'], saved.body);
+  await h.network({ operation: 'save', cloudEnabled: true, proxyUrl: '' });
+  h.local.handlers.set('plugin/installed', () => ({ marketplaces: [{ name: 'cloud', plugins: [] }] }));
+  assert.equal((await h.rpc('plugin/installed')).result.marketplaces[0].name, 'cloud');
+  await h.network({ operation: 'save', cloudEnabled: false, proxyUrl: '' });
+  assert.equal((await h.rpc('plugin/installed')).result.marketplaces[0].name, 'codex-yard');
+});
 
 test('plugin management routes to the selected backend and preserves native results, errors and progress', async t => {
   const h = await fixture(t);

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { request } from './host.ts';
-import { failureText, PageDialog, PageError, PageSection, SettingRow, Toggle, usePageData, type WorkspacePageProps } from './page-controls.tsx';
+import { failureText, fetchHost, PageDialog, PageError, PageSection, SettingRow, Toggle, usePageData, type WorkspacePageProps } from './page-controls.tsx';
+import type { PluginNetwork } from '../native/plugins.ts';
 
 interface Plugin { id: string; name: string; installed: boolean; enabled: boolean; version?: string | null; localVersion?: string | null; interface?: { displayName?: string; shortDescription?: string }; disabledReason?: string | null }
 interface Marketplace { name: string; path: string | null; plugins: Plugin[] }
@@ -8,6 +9,34 @@ interface Catalog { marketplaces: Marketplace[]; marketplaceLoadErrors?: { messa
 interface Skill { name: string; description: string; path: string; enabled: boolean }
 interface SkillList { data: { skills: Skill[]; errors?: { message: string }[] }[] }
 interface McpServer { name: string; tools: Record<string, unknown>; authStatus: string; error?: string; connectionStatus?: string }
+
+function PluginNetworkSettings({ changed }: { changed(): void }) {
+  const read = useCallback(() => fetchHost<PluginNetwork>('plugin-network'), []);
+  const data = usePageData(read);
+  return <PageSection title="Cloud plugin access">
+    <p>Off by default. Installed plugins and local marketplaces work without cloud access.</p>
+    <PageError error={data.error} retry={data.refresh} />
+    {data.value && <PluginNetworkEditor key={JSON.stringify(data.value)} value={data.value} saved={() => { data.refresh(); changed(); }} />}
+  </PageSection>;
+}
+function PluginNetworkEditor({ value, saved }: { value: PluginNetwork; saved(): void }) {
+  const [proxy, setProxy] = useState(value.proxyUrl), [busy, setBusy] = useState(false), [error, setError] = useState('');
+  async function save(cloudEnabled: boolean) {
+    if (busy) return; setBusy(true); setError('');
+    try { await fetchHost('plugin-network', { operation: 'save', cloudEnabled, proxyUrl: proxy }); saved(); }
+    catch (error) { setError(failureText(error)); } finally { setBusy(false); }
+  }
+  return <>
+    <SettingRow label="Allow cloud plugin access" description="Allow installed-plugin and directory queries to contact the cloud."
+      control={<Toggle checked={value.cloudEnabled} disabled={busy} ariaLabel="Allow cloud plugin access" onChange={enabled => void save(enabled)} />} />
+    <form onSubmit={event => { event.preventDefault(); void save(value.cloudEnabled); }}>
+      <SettingRow label="Plugin HTTP proxy" description="Optional address or port on the Yard server, for example 7897. Applies to local-host cloud inventory and directory queries."
+        control={<div className="yard-page-inline"><input aria-label="Plugin HTTP proxy" value={proxy} onChange={event => setProxy(event.currentTarget.value)}
+          placeholder="http://127.0.0.1:7897" disabled={busy} /><button type="submit" disabled={busy}>Save proxy</button></div>} />
+    </form>
+    <PageError error={error} />
+  </>;
+}
 
 export function PluginInventory({ hostId, cwd, computerOnly = false }: { hostId: string; cwd?: string; computerOnly?: boolean }) {
   const [search, setSearch] = useState(''), [query, setQuery] = useState('');
@@ -46,6 +75,7 @@ export function PluginInventory({ hostId, cwd, computerOnly = false }: { hostId:
     catch (error) { setError(failureText(error)); } finally { setBusy(false); }
   }
   return <section aria-label="Plugins" className="yard-page-section">
+    {!computerOnly && <PluginNetworkSettings changed={data.refresh} />}
     <div className="yard-page-section-heading"><h2>{computerOnly ? 'Computer use' : 'Plugins'}</h2>
       <button type="button" onClick={data.refresh} disabled={busy}>Refresh</button>
       {!computerOnly && <button type="button" onClick={() => setSource('')}>Add marketplace</button>}</div>

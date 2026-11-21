@@ -100,6 +100,26 @@ Alternatively set `YARD_ARTIFACT_RUNTIME_MANIFEST` in the **actual execution pro
 
 The validated original Linux bundle is **26.909.61513**, `@oai/artifact-tool` **2.8.59**, with its Node/Python, LibreOffice and Poppler. The original document renderer locates the copied LibreOffice relative to its Python interpreter. Cloud Docs/Slides/Sheets exports and `spreadsheets:excel-live-control` require their authorized connectors; their presence in package metadata does not supply an account. Local files and the original personal-template generator work independently. The generator writes only to the chosen `CODEX_HOME/skills`; test it with a disposable home before personal installation.
 
+Run `node scripts/verify-artifact-runtime.ts` on the destination host after preparation. Matching Linux/x64 alone does not ensure matching system libraries: on Ubuntu 22.04, the copied LibreOffice and Poppler from this bundle report missing `GLIBC_2.38` / `GLIBCXX_3.4.31`. Its Python and artifact-tool work there. For that host, install the distribution's compatible `libreoffice-writer` and `poppler-utils`, then explicitly select those tools in the **private runtime copy**. This keeps the original renderer and its runtime-relative discovery working:
+
+```bash
+# Install through your host's normal package-management process first:
+# sudo apt-get install --no-install-recommends libreoffice-writer poppler-utils
+yard_runtime_override="$(node plugins/documents/runtime.ts | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>console.log(JSON.parse(s).overrideBinDir))')"
+yard_runtime_backup="${yard_runtime_override}.before-system-tools"
+mkdir "$yard_runtime_backup"
+for yard_tool in soffice libreoffice pdfinfo pdftoppm pdftocairo pdftotext pdffonts pdfimages; do
+  test -x "/usr/bin/$yard_tool" || exit 1
+  if test -e "$yard_runtime_override/$yard_tool" || test -L "$yard_runtime_override/$yard_tool"; then
+    mv "$yard_runtime_override/$yard_tool" "$yard_runtime_backup/$yard_tool"
+  fi
+  ln -s "/usr/bin/$yard_tool" "$yard_runtime_override/$yard_tool"
+done
+node scripts/verify-artifact-runtime.ts
+```
+
+Choose a new backup directory for a later change. To undo this selection, remove only these new links and move the saved entries back. The destination still needs compatible fonts and the libraries required by its selected tools; keep their package versions with the deployment record. The preparation command performs no OS package installation or system-library upgrade.
+
 ## Computer Use on Linux
 
 Install `computer-use`, select an X11 screen 0 explicitly, and make its accessibility session available to Yard:

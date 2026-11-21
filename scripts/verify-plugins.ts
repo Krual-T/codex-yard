@@ -1,6 +1,7 @@
 // Real CLI plugin lifecycle through Yard's WebSocket bridge. All state lives in
 // a disposable Codex home; no account, desktop App or model request is used.
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { spawn, execFile } from 'node:child_process';
 import { once } from 'node:events';
 import { access, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -13,6 +14,7 @@ import { chromium } from 'playwright-core';
 import { createNativeWorkbench } from '../src/native/server.ts';
 import { record } from '../src/native/protocol.ts';
 import { filePluginNames } from '../lib/standalone-tools.ts';
+import { createPlugins } from '../src/native/plugins.ts';
 const packages = [...filePluginNames, 'computer-use', 'browser', 'chrome'];
 
 const root = await mkdtemp('/tmp/yard-plugin-cli-');
@@ -45,6 +47,9 @@ child.stderr.on('data', data => { log = (log + String(data)).slice(-32000); });
 let app: Awaited<ReturnType<typeof createNativeWorkbench>> | undefined, socket: WebSocket | undefined;
 const checks: string[] = [];
 const report: Record<string, unknown> = { checks, modelRequests: 0, root };
+const startWorkbench = () => createNativeWorkbench({ port: 0, dataDir, workspace, socketPath, codexHome,
+  sourceWorkspace: process.argv.includes('--source-workspace'),
+  hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: async () => new Response('Offline fixture', { status: 503 }) });
 try {
   if (process.env.AGENTS_TEST_MASKED_APP) {
     assert.deepEqual(await readdir(process.env.AGENTS_TEST_MASKED_APP), []);
@@ -55,9 +60,7 @@ try {
     try { await access(socketPath); break; }
     catch { if (child.exitCode !== null || Date.now() > deadline) throw new Error(log || 'CLI startup timed out'); await delay(50); }
   }
-  app = await createNativeWorkbench({ port: 0, dataDir, workspace, socketPath, codexHome,
-    sourceWorkspace: process.argv.includes('--source-workspace'),
-    hostCatalog: { hosts: [], projects: [], assignments: {} }, httpFetch: async () => new Response('Offline fixture', { status: 503 }) });
+  app = await startWorkbench();
   report.cli = app.control.server?.userAgent;
   const messages: Record<string, any>[] = [];
   async function connect() {
@@ -163,7 +166,11 @@ try {
   checks.push('The real CLI resets the standalone JavaScript kernel');
   const originalRoot = process.env.YARD_NODE_REPL_ROOT;
   process.env.YARD_NODE_REPL_ROOT = join(root, 'missing-runtime');
-  try { for (const state of ['disabled', 'optional', 'required'] as const) {
+  try {
+    // Runtime environment is captured when the host starts. Restart the
+    // disposable Yard, keeping the CLI alive, to test a missing deployment.
+    socket!.terminate(); await app.close(); app = await startWorkbench(); await connect();
+    for (const state of ['disabled', 'optional', 'required'] as const) {
     const config = { 'mcp_servers.node_repl': { enabled: state !== 'disabled', required: state === 'required' } };
     if (state === 'required') {
       await assert.rejects(rpc('thread/start', { cwd: workspace, ephemeral: true, config }), /required|MCP|mcp|spawn|No such file/);
@@ -188,6 +195,38 @@ try {
   await rpc('marketplace/remove', { marketplaceName: 'codex-yard' });
   checks.push('The native marketplace registration is removed through the same bridge');
   const config = await app.control.request('config/read', { includeLayers: false });
+  // Exercise the actual CLI HTTP client through a loopback proxy, using only a
+  // synthetic account and an unroutable origin. The proxy never forwards data.
+  const proxyHome = join(root, 'proxy-codex');
+  await mkdir(proxyHome);
+  await writeFile(join(proxyHome, 'config.toml'), 'chatgpt_base_url = "http://plugins.invalid/backend-api"\n[features]\nplugins = true\nremote_plugin = true\n');
+  const claims = { sub: 'fixture', email: 'fixture@example.invalid', exp: Math.floor(Date.now() / 1000) + 3600,
+    'https://api.openai.com/auth': { chatgpt_account_id: 'fixture-account', chatgpt_user_id: 'fixture-user', chatgpt_plan_type: 'plus' } };
+  const token = [Buffer.from('{"alg":"none"}').toString('base64url'), Buffer.from(JSON.stringify(claims)).toString('base64url'), 'fixture'].join('.');
+  await writeFile(join(proxyHome, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', tokens: {
+    id_token: token, access_token: token, refresh_token: 'fixture', account_id: 'fixture-account',
+  }, last_refresh: new Date().toISOString() }), { mode: 0o600 });
+  const proxyRequests: string[] = [];
+  const proxy = createServer((request, response) => {
+    proxyRequests.push(request.url!);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ plugins: [], pagination: { next_page_token: null }, featured_plugin_ids: [] }));
+  });
+  await new Promise<void>(done => proxy.listen(0, '127.0.0.1', done));
+  const proxyUrl = 'http://127.0.0.1:' + (proxy.address() as import('node:net').AddressInfo).port;
+  const pluginHost = createPlugins({ globals: { 'yard-plugin-network': { cloudEnabled: true, proxyUrl } }, codexHome: proxyHome, home: () => proxyHome,
+    persist: async () => {}, request: async (_host, method) => { assert.equal(method, 'config/read'); return { config: {} }; },
+    file: async (_host, path) => readFile(path, 'utf8'), directory: async () => [] });
+  try {
+    await pluginHost.request('local', 'plugin/installed', {});
+    assert.ok(proxyRequests.some(url => url.includes('plugins.invalid/backend-api/ps/plugins/installed')), JSON.stringify(proxyRequests));
+    await pluginHost.update({ cloudEnabled: false, proxyUrl });
+    const count = proxyRequests.length;
+    await pluginHost.request('local', 'plugin/installed', {});
+    assert.equal(proxyRequests.length, count);
+    checks.push('Real CLI cloud inventory uses the configured loopback proxy; disabling cloud access stops the query process and further proxy traffic');
+    report.proxyRequests = proxyRequests;
+  } finally { await pluginHost.close(); await new Promise<void>(done => proxy.close(() => done())); }
   assert.equal(record(record(config).config).model_provider, 'fixture');
   report.ok = true;
 } catch (cause) {

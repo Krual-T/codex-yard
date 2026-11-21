@@ -59,7 +59,9 @@ const site = createServer((req, res) => {
   if (req.url === '/frame') { res.end('<button onclick="this.textContent=\'Frame clicked\'">Frame click</button>'); return; }
   if (req.url === '/popup') { res.end('<title>Fixture popup</title><h1>Fixture popup</h1>'); return; }
   res.end('<title>Yard Browser fixture</title><h1>Original Browser fixture</h1><button onclick="this.textContent=\'Clicked\'">Click</button><input aria-label="Fixture text"><output></output>' +
-    '<iframe title="Fixture frame" src="http://localhost:' + (site.address() as { port: number }).port + '/frame"></iframe><a target="_blank" href="/popup">Open popup</a>' +
+    // Keep the original client's click point on the link when fonts and the
+    // preceding output make the surrounding inline content wrap.
+    '<iframe title="Fixture frame" src="http://localhost:' + (site.address() as { port: number }).port + '/frame"></iframe><a target="_blank" href="/popup" style="display:inline-block">Open popup</a>' +
     '<script>document.querySelector("input").oninput=e=>document.querySelector("output").textContent=e.target.value;</script>');
 });
 await Promise.all([new Promise<void>(r => provider.listen(0, '127.0.0.1', r)), new Promise<void>(r => site.listen(0, '127.0.0.1', r))]);

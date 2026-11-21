@@ -5,7 +5,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
-import { readFile, writeFile, mkdir, mkdtemp, rename, realpath, chmod } from 'node:fs/promises';
+import { readFile, readdir, writeFile, mkdir, mkdtemp, rename, realpath, chmod } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -84,6 +84,7 @@ import { createBrowserNotifications, notificationRoute } from './notifications.t
 import { ModelProviders } from './model-providers.ts';
 import { modelSelection } from './model-selection.ts';
 import { ProviderRouting } from './provider-routing.ts';
+import { createPlugins } from './plugins.ts';
 import { deepseekCatalog, isDeepseekProvider } from './deepseek-models.ts';
 import { adaptModelProviders } from './model-provider-renderer.ts';
 
@@ -508,10 +509,26 @@ export async function createNativeWorkbench(options: Options = {}) {
   const hostTools = await createAppTools({ adapterPath: options.adapterPath, socketPath: join(dataDir, 'app-tools.sock'),
     tools: nativeTools.tools, callTool: nativeTools.callTool,
   }).catch(async error => { await automations.close(); throw error; });
+  const plugins = createPlugins({ globals, persist, codexHome,
+    home: hostId => hostPaths.get(hostId)!.codexHome,
+    async request(hostId, method, params) {
+      return (await toolConnection(hostId)).request(method, params, { mutating: writeMethods.has(method), timeoutMs: 30_000 });
+    },
+    async file(hostId, path) {
+      if (hostId === 'local') return readFile(path, 'utf8');
+      const result = record(await files.rpc('fs/readFile', { path }, hostId, hostPaths.get(hostId)?.codexHome));
+      return Buffer.from(String(result.dataBase64), 'base64').toString('utf8');
+    },
+    async directory(hostId, path) {
+      if (hostId === 'local') return (await readdir(path, { withFileTypes: true })).map(entry => ({ fileName: entry.name, isDirectory: entry.isDirectory() }));
+      const result = record(await files.rpc('fs/readDirectory', { path }, hostId, hostPaths.get(hostId)?.codexHome));
+      return result.entries as { fileName: string; isDirectory: boolean }[];
+    },
+  });
   async function sessionToolsConfig(hostId: string, cwd: string, overrides: Record<string, unknown> = {}) {
     if (hostId !== 'local') return overrides;
     const { config } = await control.request('config/read', { includeLayers: false, cwd });
-    const installed = record(record(config).features).plugins === false ? [] : installedPluginIds(await control.request('plugin/installed', { cwds: [cwd] }));
+    const installed = record(record(config).features).plugins === false ? [] : installedPluginIds(await plugins.request(hostId, 'plugin/installed', { cwds: [cwd] }));
     const folded = nodeReplOverrides(record(config), overrides);
     return { ...hostTools.config, ...standalonePluginConfig(installed), ...folded.remaining,
       ...nodeReplConfig(folded.effective, sessionEnvironment, installed) };
@@ -987,7 +1004,10 @@ export async function createNativeWorkbench(options: Options = {}) {
       // metadata deadline. Keep the selected connection and never replay writes.
       const pluginRequest = method.startsWith('plugin/') || method.startsWith('marketplace/') || method.startsWith('mcpServer/');
       if (method === 'turn/start' && typeof params.threadId === 'string') prewarmedThreads.publish(hostId, params.threadId);
-      const execute = () => method.startsWith('project/') || method.startsWith('threadSection/') || method === 'thread/section/move'
+      const execute = () => method.startsWith('plugin/')
+        ? plugins.request(hostId, method, params, () => providerRouting.request(hostId, connection, method, requestParams,
+          { mutating: writeMethods.has(method), timeoutMs: 300_000 }))
+        : method.startsWith('project/') || method.startsWith('threadSection/') || method === 'thread/section/move'
         ? sidebar.request(hostId, method, params)
         : providerRouting.request(hostId, connection, method, requestParams, { mutating: writeMethods.has(method),
           ...(pluginRequest ? { timeoutMs: 300_000 } : {}) });
@@ -1046,6 +1066,12 @@ export async function createNativeWorkbench(options: Options = {}) {
     if (fileEndpoints.has(endpoint)) return files.fetch(endpoint, params);
     if (automationEndpoints.has(endpoint)) return automations.fetch(endpoint, params);
     switch (endpoint) {
+      case 'plugin-network': {
+        if (params.operation !== 'save') return plugins.settings();
+        const value = await plugins.update(params);
+        broadcast({ type: 'yard-plugin-network-changed' });
+        return value;
+      }
       case 'thread-goal-objective': {
         await connectedFor(client, connections, hostId);
         return files.goalObjective(params, hostId, hostPaths.get(hostId)!.codexHome);
@@ -1401,6 +1427,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     url: 'http://127.0.0.1:' + (server.address() as import('node:net').AddressInfo).port,
     async close() {
       prewarmedThreads.close();
+      await plugins.close();
       clearInterval(reconnectControl);
       await Promise.all([portForwarding.close(), developmentPreviews.close()]);
       await automations.close();
