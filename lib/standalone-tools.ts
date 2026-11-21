@@ -93,6 +93,10 @@ export function standalonePluginConfig(installedIds: readonly string[]): Record<
     if (legacy === 'yard-artifacts' && !filePluginNames.every(name => installedIds.includes(name + '@codex-yard'))) continue;
     for (const id of installedIds) if (id.startsWith(legacy + '@')) result[`plugins.${JSON.stringify(id)}.enabled`] = false;
   }
+  if (installedIds.some(id => id === 'browser@codex-yard' || id === 'chrome@codex-yard') &&
+      installedIds.includes('unified-computer-use@openai-bundled')) {
+    result['plugins."unified-computer-use@openai-bundled".enabled'] = false;
+  }
   return result;
 }
 

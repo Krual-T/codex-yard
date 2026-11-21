@@ -60,3 +60,11 @@ test('WSL Windows desktop selection uses independent helpers without inheriting 
   assert.match(config.env.NODE_REPL_TRUSTED_SERVICES, /browser-service\.mjs/);
   assert.throws(() => nodeReplConfig({}, { ...env, YARD_COMPUTER_DISPLAY: ':0' }), /Choose either/);
 });
+
+test('an installed original Browser replacement disables the App-managed cua_repl plugin only in its session', () => {
+  const app = 'unified-computer-use@openai-bundled';
+  assert.equal(standalonePluginConfig([app])[`plugins."${app}".enabled`], undefined);
+  for (const replacement of ['browser@codex-yard', 'chrome@codex-yard']) {
+    assert.equal(standalonePluginConfig([app, replacement])[`plugins."${app}".enabled`], false);
+  }
+});
