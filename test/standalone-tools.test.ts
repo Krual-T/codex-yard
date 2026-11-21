@@ -38,12 +38,34 @@ test('caller nested, table and field overrides merge into policy before transpor
 test('canonical packages replace only their installed counterparts in Yard session overrides', () => {
   const files = filePluginNames.map(name => name + '@codex-yard');
   const config = standalonePluginConfig([...files, 'documents@openai-primary-runtime', 'yard-artifacts@old', 'yard-node@old', 'unrelated@custom']);
-  assert.equal(config['plugins."documents@codex-yard".enabled'], true);
-  assert.equal(config['plugins."documents@openai-primary-runtime".enabled'], false);
-  assert.equal(config['plugins."yard-artifacts@old".enabled'], false);
-  assert.equal(config['plugins."yard-node@old".enabled'], false);
-  assert.equal(config['plugins."unrelated@custom".enabled'], undefined);
-  assert.equal(standalonePluginConfig(['yard-artifacts@old'])['plugins."yard-artifacts@old".enabled'], undefined);
+  assert.equal(config.plugins['documents@codex-yard'].enabled, true);
+  assert.equal(config.plugins['documents@openai-primary-runtime'].enabled, false);
+  assert.equal(config.plugins['yard-artifacts@old'].enabled, false);
+  assert.equal(config.plugins['yard-node@old'].enabled, false);
+  assert.equal(config.plugins['unrelated@custom'], undefined);
+  assert.equal(standalonePluginConfig(['yard-artifacts@old']).plugins['yard-artifacts@old'], undefined);
+});
+
+test('a caller plugin override preserves other canonical packages and unrelated settings', () => {
+  const overrides = { model: 'chosen', plugins: { 'browser@codex-yard': { enabled: false }, 'custom@example': { enabled: true } } };
+  const config = standalonePluginConfig(['browser@codex-yard', 'documents@codex-yard', 'browser@other'], overrides);
+  assert.equal(config.model, 'chosen');
+  assert.deepEqual(config.plugins, { 'browser@codex-yard': { enabled: false }, 'browser@other': { enabled: false },
+    'documents@codex-yard': { enabled: true }, 'custom@example': { enabled: true } });
+  assert.deepEqual(overrides.plugins, { 'browser@codex-yard': { enabled: false }, 'custom@example': { enabled: true } });
+});
+
+test('caller dotted plugin switches fold into the native table after nested policy', () => {
+  const overrides = { plugins: { 'browser@codex-yard': { enabled: true, custom: 'keep' } },
+    'plugins."browser@codex-yard".enabled': false, 'plugins."custom@local.test".enabled': true, model: 'chosen' };
+  const config = standalonePluginConfig(['browser@codex-yard', 'pdf@codex-yard'], overrides);
+  assert.deepEqual(config.plugins['browser@codex-yard'], { enabled: false, custom: 'keep' });
+  assert.deepEqual(config.plugins['custom@local.test'], { enabled: true });
+  assert.equal(config.plugins['pdf@codex-yard'].enabled, true);
+  assert.equal(config['plugins."browser@codex-yard".enabled'], undefined);
+  assert.equal(config['plugins."custom@local.test".enabled'], undefined);
+  assert.equal(config.model, 'chosen');
+  assert.equal(overrides['plugins."browser@codex-yard".enabled'], false);
 });
 
 test('WSL Windows desktop selection uses independent helpers without inheriting App pipes', () => {
@@ -63,8 +85,8 @@ test('WSL Windows desktop selection uses independent helpers without inheriting 
 
 test('an installed original Browser replacement disables the App-managed cua_repl plugin only in its session', () => {
   const app = 'unified-computer-use@openai-bundled';
-  assert.equal(standalonePluginConfig([app])[`plugins."${app}".enabled`], undefined);
+  assert.equal(standalonePluginConfig([app]).plugins[app], undefined);
   for (const replacement of ['browser@codex-yard', 'chrome@codex-yard']) {
-    assert.equal(standalonePluginConfig([app, replacement])[`plugins."${app}".enabled`], false);
+    assert.equal(standalonePluginConfig([app, replacement]).plugins[app].enabled, false);
   }
 });

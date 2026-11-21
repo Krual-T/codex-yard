@@ -530,7 +530,7 @@ export async function createNativeWorkbench(options: Options = {}) {
     const { config } = await control.request('config/read', { includeLayers: false, cwd });
     const installed = record(record(config).features).plugins === false ? [] : installedPluginIds(await plugins.request(hostId, 'plugin/installed', { cwds: [cwd] }));
     const folded = nodeReplOverrides(record(config), overrides);
-    return { ...hostTools.config, ...standalonePluginConfig(installed), ...folded.remaining,
+    return { ...hostTools.config, ...standalonePluginConfig(installed, folded.remaining),
       ...nodeReplConfig(folded.effective, sessionEnvironment, installed) };
   }
   const notifications = await createBrowserNotifications({ dataDir, connectionFor: toolConnection,
@@ -1004,9 +1004,9 @@ export async function createNativeWorkbench(options: Options = {}) {
       // metadata deadline. Keep the selected connection and never replay writes.
       const pluginRequest = method.startsWith('plugin/') || method.startsWith('marketplace/') || method.startsWith('mcpServer/');
       if (method === 'turn/start' && typeof params.threadId === 'string') prewarmedThreads.publish(hostId, params.threadId);
-      const execute = () => method.startsWith('plugin/')
+      const execute = () => method.startsWith('plugin/') || method === 'skills/list'
         ? plugins.request(hostId, method, params, () => providerRouting.request(hostId, connection, method, requestParams,
-          { mutating: writeMethods.has(method), timeoutMs: 300_000 }))
+          { mutating: writeMethods.has(method), ...(pluginRequest ? { timeoutMs: 300_000 } : {}) }))
         : method.startsWith('project/') || method.startsWith('threadSection/') || method === 'thread/section/move'
         ? sidebar.request(hostId, method, params)
         : providerRouting.request(hostId, connection, method, requestParams, { mutating: writeMethods.has(method),

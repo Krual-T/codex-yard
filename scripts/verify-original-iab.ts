@@ -10,7 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { once } from 'node:events';
 import { connect } from 'node:net';
 import { CodexConnection } from '../lib/codex.ts';
-import { nodeReplConfig } from '../lib/standalone-tools.ts';
+import { nodeReplConfig, standalonePluginConfig } from '../lib/standalone-tools.ts';
 import { projectRoot } from '../lib/app-resources.ts';
 import { startIabHost } from '../lib/browser-iab.ts';
 import { record } from '../src/native/protocol.ts';
@@ -40,6 +40,12 @@ const provider = createServer(async (req, res) => {
   try {
     const value = record(JSON.parse(body));
     if (code !== undefined) {
+      if (!report.modelSkillCatalog) {
+        const instructions = (Array.isArray(value.input) ? value.input : []).filter(item =>
+          record(item).role === 'developer' && JSON.stringify(item).includes('<skills_instructions>'));
+        report.modelSkillCatalog = ['browser:control-in-app-browser'].filter(name => JSON.stringify(instructions).includes(name));
+        await writeFile(join(evidence, 'model-skill-catalog.json'), JSON.stringify(instructions, null, 2));
+      }
       const tools = (Array.isArray(value.tools) ? value.tools : []).flatMap(raw => {
         const item = record(raw); return item.type === 'namespace' && Array.isArray(item.tools) ? item.tools.map(t => String(item.name) + '.' + String(record(t).name)) : [String(item.name)];
       });
@@ -109,11 +115,15 @@ plugins=true
   const browserHooks = hooks.data.flatMap(entry => entry.hooks).filter(hook => hook.pluginId === 'browser@codex-yard');
   assert.equal(browserHooks.length, 3);
   await backend.request('config/batchWrite', { edits: browserHooks.map(hook => ({ keyPath: `hooks.state.${JSON.stringify(hook.key)}.trusted_hash`, value: hook.currentHash, mergeStrategy: 'upsert' })), filePath: null, expectedVersion: null, reloadUserConfig: true });
+  await backend.request('config/batchWrite', { edits: [{ keyPath: 'plugins."browser@codex-yard".enabled', value: false, mergeStrategy: 'upsert' }],
+    filePath: null, expectedVersion: null, reloadUserConfig: true });
   const config = nodeReplConfig({ mcp_servers: { node_repl: { tools: { js: { approval_mode: 'approve' } } } } }, {
     ...process.env, AGENTS_CODEX_BIN: codex, CODEX_HOME: home,
     YARD_IAB_SOCKET: iab.socketPath, YARD_BROWSER_BACKEND_PATHS: iab.socketPath,
   }, ['browser@codex-yard']);
   config['mcp_servers.node_repl'].env.BROWSER_USE_DISABLE_AMBIENT_NETWORK = '1';
+  const pluginOverrides = standalonePluginConfig(['browser@codex-yard']);
+  Object.assign(config, pluginOverrides); report.threadPluginOverrides = pluginOverrides;
   const started = await backend.request('thread/start', { cwd: workspace, ephemeral: true, config }), threadId = started.thread.id;
   report.thread = threadId;
   async function js(source: string, expected: string) {
@@ -126,6 +136,8 @@ plugins=true
   }
   const client = join(projectRoot, 'plugins/browser/scripts/browser-client.mjs');
   await js(`var { setupBrowserRuntime } = await import(${JSON.stringify(client)}); var agent = await setupBrowserRuntime(); var iab = await agent.browsers.get('iab'); nodeRepl.write(await iab.documentation());`, '# Selected Browser');
+  assert.deepEqual(report.modelSkillCatalog, ['browser:control-in-app-browser']);
+  checks.push('Session-only Browser enable loads the original Skill into the actual model request');
   await writeFile(join(evidence, 'original-documentation.json'), lastInput);
   await js(`var tab = await iab.tabs.new(); await tab.goto(${JSON.stringify(origin)}); nodeRepl.write(await tab.playwright.domSnapshot()); await tab.markHandoff();`, 'Original Browser fixture');
   await js(`await tab.playwright.getByRole('button',{name:'Click',exact:true}).click(); nodeRepl.write(await tab.playwright.domSnapshot()); await tab.markHandoff();`, 'Clicked');
@@ -163,6 +175,9 @@ plugins=true
     native.on('data', chunk => { reply = Buffer.concat([reply, typeof chunk === 'string' ? Buffer.from(chunk) : chunk]); if (reply.length >= 4 && reply.length >= reply.readUInt32LE() + 4) { clearTimeout(timer); resolve(reply.subarray(4).toString()); } });
   });
   try { assert.match(await denied, /does not yet support restricted network policies/); checks.push('restricted network policy refuses attach'); } finally { native.destroy(); }
+  const globalConfig = await backend.request('config/read', { cwd: workspace, includeLayers: false });
+  report.globalBrowserEnabled = record(record(record(globalConfig.config).plugins)['browser@codex-yard']).enabled;
+  assert.equal(report.globalBrowserEnabled, false);
   report.status = 'passed'; await writeFile(join(evidence, 'summary.json'), JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify(report, null, 2));
 } catch (error) {

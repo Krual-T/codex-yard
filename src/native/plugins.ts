@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { CodexConnection } from '../../lib/codex.ts';
+import { filePluginNames, installedPluginIds, standalonePluginConfig } from '../../lib/standalone-tools.ts';
 import { record, type ObjectValue } from './protocol.ts';
 
 export interface PluginNetwork { cloudEnabled: boolean; proxyUrl: string }
@@ -17,6 +18,7 @@ interface Options {
 const stateKey = 'yard-plugin-network';
 const segment = /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/;
 const missing = (error: unknown) => /ENOENT|not found|no such file/i.test(String(error));
+const sessionPackages = new Set<string>([...filePluginNames, 'computer-use', 'browser', 'chrome']);
 
 export function pluginNetwork(value: unknown): PluginNetwork {
   return { cloudEnabled: record(value).cloudEnabled === true, proxyUrl: typeof record(value).proxyUrl === 'string' ? String(record(value).proxyUrl) : '' };
@@ -83,9 +85,9 @@ export function createPlugins(options: Options) {
     }
     return {};
   }
-  async function local(hostId: string, params: ObjectValue, installedOnly: boolean) {
+  async function local(hostId: string, params: ObjectValue, installedOnly: boolean, effectiveConfigs?: ObjectValue[]) {
     const cwds = Array.isArray(params.cwds) ? params.cwds.filter((cwd): cwd is string => typeof cwd === 'string') : [];
-    const configs = await Promise.all((cwds.length ? cwds : [undefined]).map(async cwd =>
+    const configs = effectiveConfigs ?? await Promise.all((cwds.length ? cwds : [undefined]).map(async cwd =>
       record(record(await options.request(hostId, 'config/read', { includeLayers: false, ...(cwd ? { cwd } : {}) })).config)));
     const markets = new Map<string, ObjectValue>();
     const errors: ObjectValue[] = [];
@@ -139,7 +141,85 @@ export function createPlugins(options: Options) {
     }
     return { marketplaces: [...markets.values()], marketplaceLoadErrors: errors, ...(!installedOnly ? { featuredPluginIds: [] } : {}) };
   }
+  // Native skills/list uses global plugin policy. Project Yard's eight session
+  // packages using native metadata, keeping the installed paths used by its
+  // Skill loader and skills/config/write. Never parse a second Skill catalog.
+  async function sessionSkills(params: ObjectValue, forward?: () => Promise<unknown>) {
+    const result = record(await (forward ? forward() : options.request('local', 'skills/list', params)));
+    if (!Array.isArray(result.data)) return result;
+    return { ...result, data: await Promise.all(result.data.map(async value => {
+      const entry = record(value);
+      if (typeof entry.cwd !== 'string') return value;
+      const errors = Array.isArray(entry.errors) ? [...entry.errors] : [];
+      let skills = Array.isArray(entry.skills) ? [...entry.skills] : [];
+      try {
+        const configuration = record(await options.request('local', 'config/read', { cwd: entry.cwd, includeLayers: true }));
+        const config = record(configuration.config);
+        const switches: ObjectValue[] = [];
+        // Native Skill switches accumulate only user and session-flag layers,
+        // independently of the effective config's project-level array.
+        for (const value of Array.isArray(configuration.layers) ? [...configuration.layers].reverse() : []) {
+          const layer = record(value);
+          if (layer.disabledReason != null || !['user', 'sessionFlags'].includes(String(record(layer.name).type))) continue;
+          const settings = record(record(layer.config).skills).config;
+          for (const value of Array.isArray(settings) ? settings : []) {
+            const setting = record(value), path = typeof setting.path === 'string' ? setting.path : undefined;
+            const name = typeof setting.name === 'string' ? setting.name.trim() : undefined;
+            if ((path === undefined) === (name === undefined) || name === '') continue;
+            switches.push({ ...setting, name, path: path === undefined ? undefined : await realpath(path).catch(() => path) });
+          }
+        }
+        const inventory = await local('local', { cwds: [entry.cwd] }, true, [config]);
+        const policy = standalonePluginConfig(installedPluginIds(inventory)).plugins;
+        skills = skills.filter(skill => record(policy[String(record(skill).pluginId)]).enabled !== false);
+        for (const error of inventory.marketplaceLoadErrors) errors.push({ path: error.marketplacePath, message: error.message });
+        for (const market of inventory.marketplaces) {
+          for (const value of market.plugins as ObjectValue[]) {
+            const id = String(value.id), name = String(value.name), cacheRoot = record(value.source).path;
+            if (market.name !== 'codex-yard' || !sessionPackages.has(name) || !policy[id]?.enabled) continue;
+            try {
+              if (typeof market.path !== 'string') throw new Error('The installed package has no registered local marketplace');
+              if (typeof cacheRoot !== 'string' || !isAbsolute(cacheRoot)) throw new Error('The installed package has no cache path');
+              const detail = record(record(await options.request('local', 'plugin/read', { marketplacePath: market.path, pluginName: name })).plugin);
+              const sourceRoot = record(record(detail.summary).source).path;
+              if (typeof sourceRoot !== 'string' || !isAbsolute(sourceRoot)) throw new Error('Native plugin metadata has no local source path');
+              const [sourceManifest, cacheManifest] = await Promise.all([manifest('local', sourceRoot), manifest('local', cacheRoot)]);
+              if (typeof sourceManifest.version !== 'string' || sourceManifest.version !== cacheManifest.version) throw new Error('Installed and source plugin versions differ');
+              if (!Array.isArray(detail.skills)) throw new Error('Native plugin metadata has no Skills');
+              const mapped: ObjectValue[] = [];
+              for (const value of detail.skills) {
+                const skill = record(value);
+                if (typeof skill.path !== 'string' || typeof skill.name !== 'string') throw new Error('Native Skill metadata has no name or path');
+                const path = cachePath(sourceRoot, cacheRoot, skill.path);
+                const [sourceText, cacheText] = await Promise.all([options.file('local', skill.path), options.file('local', path)]);
+                if (sourceText !== cacheText) throw new Error('Installed and source Skill contents differ: ' + skill.name);
+                const metadata = 'agents/openai.yaml';
+                const [sourceMetadata, cacheMetadata] = await Promise.all([optionalFile(join(dirname(skill.path), metadata)), optionalFile(join(dirname(path), metadata))]);
+                if (sourceMetadata !== cacheMetadata) throw new Error('Installed and source Skill metadata differ: ' + skill.name);
+                let enabled = true;
+                for (const setting of switches) {
+                  if ((setting.name === skill.name || setting.path === path) && typeof setting.enabled === 'boolean') enabled = setting.enabled;
+                }
+                const ui = { ...record(skill.interface) };
+                for (const icon of ['iconSmall', 'iconLarge']) if (typeof ui[icon] === 'string' && isAbsolute(ui[icon])) ui[icon] = cachePath(sourceRoot, cacheRoot, ui[icon]);
+                mapped.push({ ...skill, path, enabled, scope: 'user', pluginId: id, ...(skill.interface ? { interface: ui } : {}) });
+              }
+              for (const skill of mapped) if (!skills.some(value => record(value).path === skill.path ||
+                (record(value).pluginId === id && record(value).name === skill.name))) skills.push(skill);
+            } catch (error) {
+              errors.push({ path: cacheRoot ?? entry.cwd, message: `Cannot load Yard Skills for ${id}: ${String(error)}. Reinstall this plugin in Settings → Plugins.` });
+            }
+          }
+        }
+      } catch (error) { errors.push({ path: entry.cwd, message: String(error) }); }
+      return { ...entry, skills, errors };
+    })) };
+  }
+  async function optionalFile(path: string) {
+    try { return await options.file('local', path); } catch (error) { if (missing(error)) return null; throw error; }
+  }
   async function request(hostId: string, method: string, params: ObjectValue, forward?: () => Promise<unknown>) {
+    if (hostId === 'local' && method === 'skills/list') return sessionSkills(params, forward);
     if (!settings().cloudEnabled) {
       if (method === 'plugin/installed' || method === 'plugin/list') return local(hostId, params, method === 'plugin/installed');
       if (method === 'plugin/search') {
@@ -162,6 +242,12 @@ export function createPlugins(options: Options) {
     return forward ? forward() : options.request(hostId, method, params);
   }
   return { settings, update, request, close };
+}
+
+function cachePath(sourceRoot: string, cacheRoot: string, path: string) {
+  const suffix = relative(sourceRoot, path);
+  if (suffix === '..' || suffix.startsWith('..' + sep) || isAbsolute(suffix)) throw new Error('Native Skill path is outside its plugin source');
+  return join(cacheRoot, suffix);
 }
 
 function summary(id: string, name: string, data: ObjectValue, path: string | null, installed: boolean, enabled: boolean, version: string | null): ObjectValue {

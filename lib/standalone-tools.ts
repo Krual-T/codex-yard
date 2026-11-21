@@ -80,24 +80,35 @@ export function nodeReplConfig(effective: Record<string, unknown>, env: NodeJS.P
 
 /** Installed canonical packages are enabled only in Yard sessions. Their global
  * defaults, and packages which have not yet been replaced, are untouched. */
-export function standalonePluginConfig(installedIds: readonly string[]): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
+export function standalonePluginConfig(installedIds: readonly string[], overrides: Record<string, unknown> = {}): Record<string, unknown> & { plugins: Record<string, Record<string, unknown>> } {
+  // Native thread overrides split dotted paths without TOML quote decoding.
+  // A nested table preserves complete plugin IDs instead of literal quotes.
+  const plugins: Record<string, Record<string, unknown>> = {};
   for (const name of pluginNames) {
     const id = name + '@codex-yard';
     if (!installedIds.includes(id)) continue;
-    result[`plugins.${JSON.stringify(id)}.enabled`] = true;
-    for (const other of installedIds) if (other !== id && other.startsWith(name + '@')) result[`plugins.${JSON.stringify(other)}.enabled`] = false;
+    plugins[id] = { enabled: true };
+    for (const other of installedIds) if (other !== id && other.startsWith(name + '@')) plugins[other] = { enabled: false };
   }
   for (const [legacy, replacement] of [['yard-node', null], ['yard-computer', 'computer-use'], ['yard-artifacts', 'documents']] as const) {
     if (replacement && !installedIds.includes(replacement + '@codex-yard')) continue;
     if (legacy === 'yard-artifacts' && !filePluginNames.every(name => installedIds.includes(name + '@codex-yard'))) continue;
-    for (const id of installedIds) if (id.startsWith(legacy + '@')) result[`plugins.${JSON.stringify(id)}.enabled`] = false;
+    for (const id of installedIds) if (id.startsWith(legacy + '@')) plugins[id] = { enabled: false };
   }
   if (installedIds.some(id => id === 'browser@codex-yard' || id === 'chrome@codex-yard') &&
       installedIds.includes('unified-computer-use@openai-bundled')) {
-    result['plugins."unified-computer-use@openai-bundled".enabled'] = false;
+    plugins['unified-computer-use@openai-bundled'] = { enabled: false };
   }
-  return result;
+  for (const [id, policy] of Object.entries(object(overrides.plugins))) plugins[id] = { ...plugins[id], ...object(policy) };
+  const remaining = { ...overrides };
+  for (const [key, enabled] of Object.entries(overrides)) {
+    const match = /^plugins\.("(?:[^"\\]|\\.)*"|[^.]+)\.enabled$/.exec(key);
+    if (!match) continue;
+    const id = match[1]!.startsWith('"') ? JSON.parse(match[1]!) as string : match[1]!;
+    plugins[id] = { ...plugins[id], enabled };
+    delete remaining[key];
+  }
+  return { ...remaining, plugins };
 }
 
 export function installedPluginIds(value: unknown): string[] {

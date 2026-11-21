@@ -88,25 +88,77 @@ try {
   const market = listing.marketplaces.find((value: any) => value.name === 'codex-yard');
   assert.deepEqual(market.plugins.map((value: any) => value.name).sort(), [...packages].sort());
   checks.push('Real CLI discovers all eight canonical plugin packages through the Yard bridge');
+  const detailSkills = new Map<string, Record<string, any>[]>();
   for (const name of packages) {
     await rpc('plugin/install', { marketplacePath, pluginName: name, installAttemptId: 'yard-validation-' + name });
     const plugin = await rpc('plugin/read', { marketplacePath, pluginName: name });
     assert.equal(plugin.plugin.summary.installed, true);
     assert.equal(plugin.plugin.summary.enabled, true);
+    detailSkills.set(name + '@codex-yard', plugin.plugin.skills);
   }
+  const nativeSkills = record(await app.control.request('skills/list', { cwds: [workspace], forceReload: true }));
+  const nativeSkillPaths = (Array.isArray(nativeSkills.data) ? nativeSkills.data : []).flatMap(entry =>
+    Array.isArray(record(entry).skills) ? record(entry).skills as Record<string, any>[] : []);
+  report.skillPaths = [...detailSkills].flatMap(([pluginId, skills]) => skills.map(skill => ({ pluginId, name: skill.name,
+    detailsPath: skill.path, nativePath: nativeSkillPaths.find(value => value.pluginId === pluginId && value.name === skill.name)?.path })));
+  const setPackages = (names: string[], enabled: boolean) => rpc('config/batchWrite', {
+    edits: names.map(name => ({ keyPath: 'plugins."' + name + '@codex-yard".enabled', value: enabled, mergeStrategy: 'upsert' })),
+    filePath: null, expectedVersion: null, reloadUserConfig: true });
   for (const enabled of [false, true]) {
-    await rpc('config/batchWrite', { edits: [{ keyPath: 'plugins."computer-use@codex-yard".enabled', value: enabled, mergeStrategy: 'upsert' }],
-      filePath: null, expectedVersion: null, reloadUserConfig: true });
+    await setPackages(['computer-use'], enabled);
     assert.equal((await rpc('plugin/read', { marketplacePath, pluginName: 'computer-use' })).plugin.summary.enabled, enabled);
   }
   checks.push('Native plugin enable controls use the real CLI configuration contract');
+  await setPackages(packages, false);
+  const disabledNative = await app.control.request<Record<string, any>>('skills/list', { cwds: [workspace], forceReload: true });
+  assert.ok(!disabledNative.data.flatMap((value: any) => value.skills).some((value: any) => packages.some(name => value.pluginId === name + '@codex-yard')));
+  for (const name of packages) {
+    const detail = (await rpc('plugin/read', { marketplacePath, pluginName: name })).plugin;
+    assert.equal(detail.summary.enabled, false);
+    assert.ok(detail.skills.length > 0);
+  }
   const allSkills = await rpc('skills/list', { cwds: [workspace], forceReload: true });
+  const projectedSkills = allSkills.data.flatMap((value: any) => value.skills).filter((value: any) => packages.some(name => value.pluginId === name + '@codex-yard'));
+  assert.deepEqual(allSkills.data.flatMap((value: any) => value.errors), []);
+  assert.equal(projectedSkills.length, nativeSkillPaths.filter(value => packages.some(name => value.pluginId === name + '@codex-yard')).length);
+  for (const skill of projectedSkills) {
+    const native = nativeSkillPaths.find(value => value.pluginId === skill.pluginId && value.name === skill.name)!;
+    assert.ok(native, skill.name);
+    assert.equal(skill.path, native.path, skill.name);
+    assert.equal(skill.description, native.description, skill.name);
+    assert.equal(skill.scope, native.scope, skill.name);
+    assert.deepEqual(skill.interface ?? null, native.interface ?? null, skill.name);
+  }
   const expectedSkills = ['documents:documents', 'pdf:pdf', 'spreadsheets:Spreadsheets', 'presentations:Presentations',
     'template-creator:template-creator', 'computer-use:computer-use', 'browser:control-in-app-browser', 'chrome:control-chrome'];
   for (const name of expectedSkills) {
     assert.ok(allSkills.data.flatMap((value: any) => value.skills).some((value: any) => value.name === name), name);
   }
-  checks.push('Real CLI installs the original packages and loads the five separate file Skills and computer/browser Skills with their original names');
+  checks.push('With all eight packages globally disabled, Yard exposes the original native Skill metadata at the exact installed cache paths without changing global policy');
+  const computer = projectedSkills.find((value: any) => value.pluginId === 'computer-use@codex-yard')!;
+  await rpc('skills/config/write', { path: computer.path, enabled: false });
+  const disabledProjection = await rpc('skills/list', { cwds: [workspace], forceReload: true });
+  assert.equal(disabledProjection.data.flatMap((value: any) => value.skills).find((value: any) => value.path === computer.path).enabled, false);
+  // Native 0.169 has no per-thread skills/list. Temporarily enabling only this
+  // fixture package confirms that the native loader honors this same cache
+  // path switch; no model, account or user configuration is involved.
+  await setPackages(['computer-use'], true);
+  const nativeDisabledSkill = await app.control.request<Record<string, any>>('skills/list', { cwds: [workspace], forceReload: true });
+  assert.equal(nativeDisabledSkill.data.flatMap((value: any) => value.skills).find((value: any) => value.path === computer.path).enabled, false);
+  await setPackages(['computer-use'], false);
+  const disabledDetail = await rpc('plugin/read', { marketplacePath, pluginName: 'computer-use' });
+  assert.equal(disabledDetail.plugin.summary.enabled, false);
+  // plugin/read uses the registered source path, so its enabled flag does not
+  // include a switch saved for the installed Skill. Keep this regression.
+  assert.equal(disabledDetail.plugin.skills[0].enabled, true);
+  report.disabledSkillConfig = record(record(await app.control.request('config/read', { includeLayers: false })).config).skills;
+  await rpc('skills/config/write', { path: computer.path, enabled: true });
+  const restoredProjection = await rpc('skills/list', { cwds: [workspace], forceReload: true });
+  assert.equal(restoredProjection.data.flatMap((value: any) => value.skills).find((value: any) => value.path === computer.path).enabled, true);
+  const globalPlugins = record(record(await app.control.request('config/read', { includeLayers: false })).config).plugins;
+  for (const name of packages) assert.equal(record(record(globalPlugins)[name + '@codex-yard']).enabled, false);
+  report.projectedSkills = projectedSkills.map((skill: any) => ({ name: skill.name, path: skill.path, pluginId: skill.pluginId }));
+  checks.push('A Skill toggle uses the native installed path, stays disabled in Yard and the native loader, and leaves package global settings disabled');
   if (process.argv.includes('--ui')) {
     const output = resolve(process.env.AGENTS_PLUGINS_EVIDENCE ?? '.local/plugins-cli');
     await mkdir(output, { recursive: true });
@@ -114,6 +166,15 @@ try {
       headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     const errors: string[] = [];
+    const skillRequests = new Set<string>(), skillReplies: Record<string, any>[] = [];
+    page.on('websocket', connection => {
+      connection.on('framesent', frame => {
+        try { const value = JSON.parse(String(frame.payload)); if (value.type === 'mcp-request' && value.request?.method === 'skills/list') skillRequests.add(String(value.request.id)); } catch { /* Non-RPC frame. */ }
+      });
+      connection.on('framereceived', frame => {
+        try { const value = JSON.parse(String(frame.payload)); if (value.type === 'mcp-response' && skillRequests.has(String(value.message?.id))) skillReplies.push(value.message); } catch { /* Non-RPC frame. */ }
+      });
+    });
     page.on('pageerror', cause => errors.push(cause.message));
     try {
       await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/plugins'), { waitUntil: 'commit' });
@@ -122,8 +183,27 @@ try {
       await documentPlugin.click();
       await page.getByText('26.909.61513', { exact: true }).waitFor();
       await page.screenshot({ path: join(output, 'plugins.png') });
+      await page.goto(app.url + '/?initialRoute=' + encodeURIComponent('/skills'), { waitUntil: 'commit' });
+      await page.getByText('Skills', { exact: true }).first().click();
+      if (process.argv.includes('--source-workspace')) {
+        await page.getByText('computer-use:computer-use', { exact: true }).first().waitFor({ timeout: 30000 });
+        await page.getByText('browser:control-in-app-browser', { exact: true }).first().waitFor();
+      } else {
+        // The original Skills page lists personal/system Skills and deliberately
+        // presents plugin-owned Skills through Plugins. Keep that UI contract.
+        await page.getByPlaceholder('Search skills').waitFor();
+      }
+      const skillDeadline = Date.now() + 30000;
+      while (!skillReplies.length && Date.now() < skillDeadline) await delay(50);
+      assert.ok(skillReplies.length, 'The renderer requested native skills/list');
+      const uiSkills = skillReplies.at(-1)!.result.data.flatMap((value: any) => value.skills)
+        .filter((value: any) => packages.some(name => value.pluginId === name + '@codex-yard'));
+      assert.deepEqual(uiSkills.map((value: any) => value.name).sort(), projectedSkills.map((value: any) => value.name).sort());
+      report.ui = { sourceWorkspace: process.argv.includes('--source-workspace'), pluginOwnedSkillsDelivered: uiSkills.length,
+        pluginOwnedSkillsOnSkillsPage: process.argv.includes('--source-workspace') };
+      await page.screenshot({ path: join(output, 'skills.png') });
       assert.deepEqual(errors, []);
-      checks.push('Plugins page renders the installed standalone plugin with the real CLI and no page exceptions');
+      checks.push('The renderer receives all original plugin Skill metadata with globally disabled packages; plugin details render without page exceptions');
     } catch (cause) {
       report.uiText = await page.locator('body').innerText();
       await page.screenshot({ path: join(output, 'plugins-failure.png') });
